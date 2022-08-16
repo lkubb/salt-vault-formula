@@ -1,0 +1,45 @@
+{
+  "template": "https://github.com/lkubb/salt-template-formula",
+  "commit": "63b1c0066d38bfe946a650abeda910522638d427",
+  "checkout": null,
+  "context": {
+    "cookiecutter": {
+      "_extensions": [
+        "local_extensions.YAMLDumper"
+      ],
+      "_jinja2_env_vars": {
+        "block_start_string": "{!",
+        "block_end_string": "!}",
+        "variable_start_string": "{=",
+        "variable_end_string": "=}",
+        "comment_start_string": "{@",
+        "comment_end_string": "@}"
+      },
+      "name": "Vault",
+      "abbr": "vault",
+      "abbr_pysafe": "vault",
+      "pkg": "vault",
+      "needs_repo": "y",
+      "config": "/etc/vault.d/salt.json",
+      "service": "vault",
+      "subcomponent": "",
+      "subcomponent_config": "",
+      "git_username": "lkubb",
+      "_lookup": {},
+      "_settings": {
+        "config": {},
+        "disable_swap": false,
+        "init": {
+          "output": "/root/vault_init",
+          "key_shares": 3,
+          "key_threshold": 2,
+          "pgp_keys": [],
+          "root_token_pgp_key": null,
+          "vault_addr": null
+        }
+      },
+      "_template": "https://github.com/lkubb/salt-template-formula"
+    }
+  },
+  "directory": null
+}

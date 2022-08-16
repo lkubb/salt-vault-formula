@@ -1,0 +1,28 @@
+# -*- coding: utf-8 -*-
+# vim: ft=yaml
+#
+# Set default values.
+---
+values:
+  lookup:
+    rootgroup: root
+    pkg:
+      name: vault
+    enablerepo:
+      stable: true
+    config: '/etc/vault.d/salt.json'
+    service:
+      name: vault
+  config: {}
+  disable_swap: false
+  init:
+    key_shares: 3
+    key_threshold: 2
+    output: /root/vault_init
+    pgp_keys: []
+    root_token_pgp_key: null
+    vault_addr: null
+  # Just here for testing
+  added_in_defaults: defaults_value
+  winner: defaults
+...

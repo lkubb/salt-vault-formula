@@ -1,0 +1,30 @@
+# -*- coding: utf-8 -*-
+# vim: ft=yaml
+#
+# Set values specific to:
+#   salt['config.get']('os_family') == Debian.
+#
+# You just need to add the key:values for this `os_family` that differ
+# from `defaults.yaml` + `<osarch>.yaml`.
+#
+# If you do not need to provide defaults via the `os_family` config,
+# you can remove this file or provide at least an empty dict, e.g.
+# values: {}
+---
+values:
+  lookup:
+    pkg_manager: apt
+    repos:
+      stable:
+        humanname: Hashicorp
+        name: >-
+          deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg]
+          https://apt.releases.hashicorp.com {{ grains.lsb_distrib_codename }} main
+        key_url: https://apt.releases.hashicorp.com/gpg
+        file: /etc/apt/sources.list.d/hashicorp.list
+        keyring:
+          file: /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          fingerprint: E8A032E094D8EB4EA189D270DA418C88A3219F7B
+          source: https://apt.releases.hashicorp.com/gpg
+          source_hash: false
+...

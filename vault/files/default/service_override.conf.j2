@@ -1,0 +1,8 @@
+[Unit]
+ConditionFileNotEmpty={{ vault.lookup.config }}
+
+[Service]
+ExecStart=
+ExecStart=/usr/bin/vault server -config={{ vault.lookup.config }}
+# Disable core dumps
+LimitCORE=0

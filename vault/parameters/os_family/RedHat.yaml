@@ -1,0 +1,30 @@
+# -*- coding: utf-8 -*-
+# vim: ft=yaml
+#
+# Set values specific to:
+#   salt['config.get']('os_family') == RedHat.
+#
+# You just need to add the key:values for this `os_family` that differ
+# from `defaults.yaml` + `<osarch>.yaml`.
+#
+# If you do not need to provide defaults via the `os_family` config,
+# you can remove this file or provide at least an empty dict, e.g.
+# values: {}
+---
+values:
+  lookup:
+    pkg_manager: yum
+    repos:
+      stable:
+        humanname: Hashicorp Stable - $basearch
+        name: hashicorp
+        baseurl: https://rpm.releases.hashicorp.com/RHEL/$releasever/$basearch/stable
+        gpgkey: https://rpm.releases.hashicorp.com/gpg
+        gpgcheck: 1
+      test:
+        humanname: Hashicorp Test - $basearch
+        name: hashicorp-test
+        baseurl: https://rpm.releases.hashicorp.com/RHEL/$releasever/$basearch/test
+        gpgkey: https://rpm.releases.hashicorp.com/gpg
+        gpgcheck: 1
+...
