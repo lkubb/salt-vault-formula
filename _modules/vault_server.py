@@ -5,8 +5,8 @@ This is intended to complement the official module.
 
 from pathlib import Path
 
-from salt.exceptions import CommandExecutionError, SaltInvocationError
 import salt.utils.path
+from salt.exceptions import CommandExecutionError, SaltInvocationError
 
 __virtualname__ = "vault_server"
 
@@ -28,6 +28,7 @@ def _vault(
     expect_error=False,
     output_loglevel=None,
     env=None,
+    vault_addr="https://127.0.0.1:8200",
 ):
     """
     Generic helper for calling vault-cli. Does not rely on HVAC
@@ -37,7 +38,9 @@ def _vault(
     command = [command] if not isinstance(command, list) else command
     args = args or []
     options = options or []
+    env = env or {}
 
+    env["VAULT_ADDR"] = vault_addr
     options.append(("non-interactive", True))
 
     if json:
@@ -82,12 +85,8 @@ def _parse_args(args, include_equal=True):
 
 
 def is_initialized(vault_addr="https://127.0.0.1:8200"):
-    env = {
-        "VAULT_ADDR": vault_addr,
-    }
-
     # exit code: 0=yes 1=error 2=no
-    out = _vault("status", env=env, expect_error=True)
+    out = _vault("status", env=env, expect_error=True, vault_addr=vault_addr)
     return out["retcode"] == 0
 
 
@@ -96,16 +95,16 @@ def initialize(
     key_threshold,
     pgp_keys=None,
     root_token_pgp_key=None,
+    rekey=False,
     vault_addr="https://127.0.0.1:8200",
 ):
-    env = {
-        "VAULT_ADDR": vault_addr,
-    }
-
     options = [
         ("key-shares", key_shares),
         ("key-threshold", key_threshold),
     ]
+
+    cmd = ["operator"]
+    cmd.append("rekey -init" if rekey else "init")
 
     pgp_keys_tmp = []
 
@@ -123,7 +122,7 @@ def initialize(
 
         options.append(("pgp-keys", ",".join(pgp_keys_parsed)))
 
-    if root_token_pgp_key:
+    if not rekey and root_token_pgp_key:
         if root_token_pgp_key.startswith("-----BEGIN PGP PUBLIC KEY BLOCK-----"):
             tmp = __salt__["temp.file"]()
             __salt__["file.write"](tmp, root_token_pgp_key)
@@ -132,7 +131,7 @@ def initialize(
         options.append(("root-token-pgp-key", root_token_pgp_key))
 
     out = _vault(
-        ["operator", "init"], options=options, env=env, output_loglevel="quiet"
+        cmd, options=options, env=env, output_loglevel="quiet", vault_addr=vault_addr
     )
 
     if pgp_keys_tmp:
