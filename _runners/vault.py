@@ -10,11 +10,9 @@ documented in the execution module docs.
 import base64
 import json
 import logging
-import string
 import time
 
 import requests
-
 import salt.crypt
 import salt.exceptions
 
@@ -65,7 +63,7 @@ def generate_token(
         storage_type = config["auth"].get("token_backend", "session")
 
         if config["auth"]["method"] == "approle":
-            if _selftoken_expired():
+            if __utils__["vault.selftoken_expired"]():
                 log.debug("Vault token expired. Recreating one")
                 # Requesting a short ttl token
                 url = "{}/v1/auth/approle/login".format(config["url"])
@@ -211,7 +209,9 @@ def _get_policies(minion_id, config):
     policies = []
     for pattern in policy_patterns:
         try:
-            for expanded_pattern in _expand_pattern_lists(pattern, **mappings):
+            for expanded_pattern in __utils__["vault.expand_pattern_lists"](
+                pattern, **mappings
+            ):
                 policies.append(
                     expanded_pattern.format(**mappings).lower()  # Vault requirement
                 )
@@ -220,81 +220,6 @@ def _get_policies(minion_id, config):
 
     log.debug("%s policies: %s", minion_id, policies)
     return policies
-
-
-def _expand_pattern_lists(pattern, **mappings):
-    """
-    Expands the pattern for any list-valued mappings, such that for any list of
-    length N in the mappings present in the pattern, N copies of the pattern are
-    returned, each with an element of the list substituted.
-
-    pattern:
-        A pattern to expand, for example ``by-role/{grains[roles]}``
-
-    mappings:
-        A dictionary of variables that can be expanded into the pattern.
-
-    Example: Given the pattern `` by-role/{grains[roles]}`` and the below grains
-
-    .. code-block:: yaml
-
-        grains:
-            roles:
-                - web
-                - database
-
-    This function will expand into two patterns,
-    ``[by-role/web, by-role/database]``.
-
-    Note that this method does not expand any non-list patterns.
-    """
-    expanded_patterns = []
-    f = string.Formatter()
-
-    # This function uses a string.Formatter to get all the formatting tokens from
-    # the pattern, then recursively replaces tokens whose expanded value is a
-    # list. For a list with N items, it will create N new pattern strings and
-    # then continue with the next token. In practice this is expected to not be
-    # very expensive, since patterns will typically involve a handful of lists at
-    # most.
-
-    for (_, field_name, _, _) in f.parse(pattern):
-        if field_name is None:
-            continue
-        (value, _) = f.get_field(field_name, None, mappings)
-        if isinstance(value, list):
-            token = "{{{0}}}".format(field_name)
-            expanded = [pattern.replace(token, str(elem)) for elem in value]
-            for expanded_item in expanded:
-                result = _expand_pattern_lists(expanded_item, **mappings)
-                expanded_patterns += result
-            return expanded_patterns
-    return [pattern]
-
-
-def _selftoken_expired():
-    """
-    Validate the current token exists and is still valid
-    """
-    try:
-        verify = __opts__["vault"].get("verify", None)
-        # Vault Enterprise requires a namespace
-        namespace = __opts__["vault"].get("namespace")
-        url = "{}/v1/auth/token/lookup-self".format(__opts__["vault"]["url"])
-        if "token" not in __opts__["vault"]["auth"]:
-            return True
-        headers = {"X-Vault-Token": __opts__["vault"]["auth"]["token"]}
-        # Add Vault namespace to headers if Vault Enterprise enabled
-        if namespace is not None:
-            headers["X-Vault-Namespace"] = namespace
-        response = requests.get(url, headers=headers, verify=verify)
-        if response.status_code != 200:
-            return True
-        return False
-    except Exception as e:  # pylint: disable=broad-except
-        raise salt.exceptions.CommandExecutionError(
-            "Error while looking up self token : {}".format(str(e))
-        )
 
 
 def _get_token_create_url(config):
