@@ -119,7 +119,7 @@ minion-passwd   minionbadpasswd1
                 minion-passwd:
                     minionbadpasswd1
 
-.. versionadded:: pending_pr
+.. versionadded:: 3006
 
     Pillar values from previously rendered pillars can be used to template
     vault ext_pillar paths.
@@ -131,9 +131,10 @@ You cannot use pillar values sourced from Vault in pillar-templated policies.
 
 If a pillar pattern matches multiple paths, the results are merged according to
 the master configuration values :conf_master:`pillar_source_merging_strategy <pillar_source_merging_strategy>`
-and :conf_master:`pillar_merge_lists <pillar_merge_lists>` by default. If the optional nesting_key was defined,
-the merged result will be nested below. There is currently no way to nest
-multiple results under different keys.
+and :conf_master:`pillar_merge_lists <pillar_merge_lists>` by default.
+
+If the optional nesting_key was defined, the merged result will be nested below.
+There is currently no way to nest multiple results under different keys.
 
 You can override the merging behavior per defined ext_pillar:
 
@@ -150,10 +151,9 @@ You can override the merging behavior per defined ext_pillar:
 import logging
 
 import salt.utils.dictupdate
-from salt.exceptions import SaltException
-
 # import salt.utils.vault
 import vaultutil as vault
+from salt.exceptions import SaltException
 
 log = logging.getLogger(__name__)
 
@@ -185,7 +185,7 @@ def ext_pillar(
 
     paths = [comp for comp in comps if comp.startswith("path=")]
     if not paths:
-        log.error(f"`{conf}` is not a valid Vault ext_pillar config.")
+        log.error('"%s" is not a valid Vault ext_pillar config', conf)
         return {}
 
     merge_strategy = merge_strategy or __opts__.get(
@@ -206,7 +206,7 @@ def ext_pillar(
                 merge_lists=merge_lists,
             )
         except SaltException as err:
-            log.warning("Failed to read secret! %s: %s", type(err).__name__, err)
+            log.info("Vault secret not found for: %s", path)
 
     if nesting_key:
         vault_pillar = {nesting_key: vault_pillar}
@@ -224,7 +224,7 @@ def _get_paths(path_pattern, minion_id, pillar):
         for expanded_pattern in vault.expand_pattern_lists(path_pattern, **mappings):
             paths.append(expanded_pattern.format(**mappings))
     except KeyError:
-        log.warning("Could not resolve path pattern %s", path_pattern)
+        log.warning("Could not resolve pillar path pattern %s", path_pattern)
 
-    log.debug(f"{minion_id} paths: {paths}")
+    log.debug(f"{minion_id} vault pillar paths: {paths}")
     return paths

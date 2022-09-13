@@ -17,13 +17,11 @@ import salt.cache
 import salt.crypt
 import salt.exceptions
 import salt.pillar
-
 # import salt.utils.vault
 import salt.utils.data
 import salt.utils.versions
-from salt.exceptions import SaltInvocationError, SaltRunnerError
-
 import vaultutil as vault
+from salt.exceptions import SaltInvocationError, SaltRunnerError
 
 log = logging.getLogger(__name__)
 
@@ -396,20 +394,16 @@ def show_policies(minion_id, refresh_pillar="__unset__", expire=None):
         The minion's id.
 
     refresh_pillar
-        Whether to refresh the pillar data when rendering the templated policies.
-        Using cached pillar data only might cause the policies to be out of sync.
-        If there is no cached pillar data available for the minion, pillar templates
-        will fail to render at all.
-        If you use pillar values for templating policies and do not disable refreshing
-        pillar data, make sure their compilation does not rely on the vault execution
-        module. It will be broken since otherwise, an infinite loop would result.
+        Whether to refresh the pillar data when rendering templated policies.
         None will only refresh when the cached data is unavailable, boolean values
-        force one behavior always. Defaults to config value ``policies:refresh_pillar`` or None.
+        force one behavior always.
+        Defaults to config value ``policies_refresh_pillar`` or None.
 
     expire
-        Policy computation can be heavy in case the pillar data has not been cached.
-        Therefore, a short-lived cache is used. This specifies the expiration timeout
-        in seconds. Defaults to 60.
+        Policy computation can be heavy in case pillar data is used in templated policies and
+        it has not been cached. Therefore, a short-lived cache specifically for rendered policies
+        is used. This specifies the expiration timeout in seconds.
+        Defaults to config value ``policies_cache_time`` or 60.
 
     CLI Example:
 
@@ -631,7 +625,7 @@ def _get_policies(
     Get the policies that should be applied to a token for minion_id
     """
     grains, pillar = _get_minion_data(minion_id, refresh_pillar)
-    mappings = {"minion": minion_id, "grains": grains or {}, "pillar": pillar}
+    mappings = {"minion": minion_id, "grains": grains, "pillar": pillar}
 
     policies = []
     for pattern in _config("policies:assign"):
@@ -681,6 +675,13 @@ def _get_policies_cached(minion_id, refresh_pillar=None, expire=60):
 def _get_minion_data(minion_id, refresh_pillar=None):
     _, grains, pillar = salt.utils.minions.get_minion_data(minion_id, __opts__)
 
+    if grains is None:
+        grains = {}
+        # To properly refresh minion grains, something like this could be used:
+        # __salt__["salt.execute"](minion_id, "saltutil.refresh_grains", refresh_pillar=False)
+        # This is deliberately not done since grains should not be used to target
+        # secrets anyways.
+
     # salt.utils.minions.get_minion_data only returns data from cache or None.
     # To make sure the correct policies are available, the pillar needs to be
     # refreshed. This can cause an infinite loop if the pillar data itself
@@ -691,12 +692,12 @@ def _get_minion_data(minion_id, refresh_pillar=None):
             raise SaltRunnerError(
                 "Cyclic dependency detected while refreshing pillar for vault policy templating. "
                 "This is caused by some pillar value relying on the vault execution module. "
-                "Either remove the dependency from your pillar, disable refreshing pillar data for policy templating "
-                "or do not use pillar values in policy templates."
+                "Either remove the dependency from your pillar, disable refreshing pillar data "
+                "for policy templating or do not use pillar values in policy templates."
             )
         local_opts = copy.deepcopy(__opts__)
         # Relying on opts for ext_pillars does not work properly (only the first one runs
-        # correctly because the opts dunder is synced to the initial modules as well)
+        # correctly).
         extra_minion_data = {"_vault_runner_is_compiling_pillar_templates": True}
         local_opts.update(extra_minion_data)
         pillar = LazyPillar(

@@ -444,6 +444,12 @@ Functions to interact with Hashicorp Vault.
 
         Defaults to ``[saltstack/minions, saltstack/{minion}]``.
 
+        .. versionadded:: 3006
+
+            Policies can be templated with pillar values as well: ``salt_role_{pillar[roles]}``
+            Make sure to only reference pillars that are not sourced from Vault since the latter
+            ones might be unavailable during policy rendering.
+
         .. important::
 
             See :ref:`Is Targeting using Grain Data Secure?
@@ -476,6 +482,19 @@ Functions to interact with Hashicorp Vault.
         - ``true`` always compiles the pillar. This can cause additional strain
           on the master since the compilation is costly.
 
+        .. note::
+
+            Using cached pillar data only (refresh_pillar=False) might cause the policies
+            to be out of sync. If there is no cached pillar data available for the minion,
+            pillar templates will fail to render at all.
+
+            If you use pillar values for templating policies and do not disable
+            refreshing pillar data, make sure the relevant values are not sourced
+            from Vault (ext_pillar, sdb) or from a pillar sls file that uses the vault
+            execution module. Although this will often work when cached pillar data is
+            available, if the master needs to compile the pillar data during policy rendering,
+            all Vault modules will be broken to prevent an infinite loop.
+
     server
     ~~~~~~
         ..versionchanged:: pending_pr
@@ -505,10 +524,9 @@ Functions to interact with Hashicorp Vault.
 """
 import logging
 
-from salt.exceptions import CommandExecutionError, SaltException
-
 # import salt.utils.vault
 import vaultutil as vault
+from salt.exceptions import CommandExecutionError, SaltException
 
 log = logging.getLogger(__name__)
 
