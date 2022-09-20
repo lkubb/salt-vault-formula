@@ -183,10 +183,7 @@ def clear_cache(opts, ckey=None, connection_only=True):
     Clears non-session cache.
     """
     cache = salt.cache.factory(opts)
-    if SALT_RUNTYPE_MASTER_IMPERSONATING == _get_salt_run_type(opts):
-        cbank = _get_config_cache_bank(None, opts["grains"]["id"])
-    else:
-        cbank = _get_config_cache_bank()
+    cbank = _get_config_cache_bank(opts=opts)
     if connection_only:
         cbank += "/connection"
     cache.flush(cbank, ckey)
@@ -295,7 +292,7 @@ def get_authd_client(opts, context, force_local=False, get_config=False):
         client, config = _build_authd_client(opts, context, force_local=force_local)
 
     # do not check the vault server for token validity because that consumes a use
-    if client.is_valid(remote=False):
+    if client.token_valid(remote=False):
         if get_config:
             return client, config
         return client
@@ -344,7 +341,7 @@ def _build_authd_client(opts, context, force_local=False):
             token_store=token_auth,
         )
         client = AuthenticatedVaultClient(auth, **config["server"])
-    if config["auth"]["method"] in ["token", "wrapped_token"]:
+    elif config["auth"]["method"] in ["token", "wrapped_token"]:
         token = _fetch_token(
             config,
             opts,
@@ -373,11 +370,12 @@ def _get_connection_config(cbank, opts, context, force_local=False):
                 log.debug("Using cached Vault server connection configuration.")
                 return config, None
             log.debug("Cached config outdated, flushing connection config cache.")
+            # reset all connection-scoped data
             cache.flush(cbank)
 
         log.debug("Using new Vault server connection configuration.")
         config = _query_master(
-            "get_config", opts, issue_params=opts.get("issue_params")
+            "get_config", opts, issue_params=opts.get("vault", {}).get("issue_params")
         )
         config = parse_config(config)
         # do not couple token cache with configuration cache
@@ -411,14 +409,14 @@ def _fetch_secret_id(config, opts, secret_id_cache, force_local=False):
             return secret_id
 
         log.debug("Fetching new Vault AppRole secret-id.")
-        creation_path = "auth/{}/role/{}/secret-id".format(
-            config["auth"]["approle_mount"], config["auth"]["approle_name"]
-        )
         secret_id = _query_master(
             "generate_secret_id",
             opts,
             expected_server=config["server"],
-            unwrap_expected_creation_path=creation_path,
+            unwrap_expected_creation_path=_get_expected_creation_path(
+                "secret_id", config
+            ),
+            issue_params=opts.get("vault", {}).get("issue_params"),
         )
         secret_id = VaultAppRoleSecretId(**secret_id["data"])
 
@@ -469,13 +467,14 @@ def _fetch_token(config, opts, token_cache, force_local=False, embedded_token=No
 
         if not isinstance(token, VaultToken) or not token.is_valid(10):
             log.debug("Fetching new Vault token.")
-            creation_path = r"auth/token/create(/[\w-]+)?"
             token = _query_master(
                 "generate_new_token",
                 opts,
                 expected_server=config["server"],
-                unwrap_expected_creation_path=creation_path,
-                issue_params=opts.get("issue_params"),
+                unwrap_expected_creation_path=_get_expected_creation_path(
+                    "token", config
+                ),
+                issue_params=opts.get("vault", {}).get("issue_params"),
             )
             token = VaultToken(**token["auth"])
 
@@ -503,7 +502,7 @@ def _fetch_token(config, opts, token_cache, force_local=False, embedded_token=No
             )["auth"]
         elif embedded_token is not None:
             token = token_cache.get()
-            if token is None or token != str(token):
+            if token is None or embedded_token != str(token):
                 # lookup and verify raw token
                 client = VaultClient(**config["server"])
                 token_info = client.token_lookup(embedded_token, raw=True)
@@ -789,14 +788,16 @@ def _get_expected_creation_path(secret_type, config=None):
     if "secret_id" == secret_type:
         if config is not None:
             return "auth/{}/role/{}/secret-id".format(
-                config["auth"]["approle_mount"], config["auth"]["approle_name"]
+                re.escape(config["auth"]["approle_mount"]),
+                re.escape(config["auth"]["approle_name"]),
             )
         return r"auth/[^/]+/role/[^/]+/secret-id"
 
     if "role_id" == secret_type:
         if config is not None:
             return "auth/{}/role/{}/role-id".format(
-                config["auth"]["approle_mount"], config["auth"]["approle_name"]
+                re.escape(config["auth"]["approle_mount"]),
+                re.escape(config["auth"]["approle_name"]),
             )
         return r"auth/[^/]+/role/[^/]+/role-id"
 
@@ -1021,7 +1022,7 @@ class VaultClient:
             ):
                 raise VaultUnwrapException(
                     "Wrapped response was not created from expected Vault path: "
-                    f"`{wrapped.creation_path}` is not matched by any of `{expected_creation_path}`.\n"
+                    f"`{wrap_info['creation_path']}` is not matched by any of `{expected_creation_path}`.\n"
                     "This indicates tampering with the wrapping token by a third party "
                     "and should be taken very seriously! If you changed some authentication-"
                     "specific configuration on the master recently, especially minion "
@@ -1106,7 +1107,7 @@ class VaultClient:
         if self.namespace is not None:
             headers["X-Vault-Namespace"] = self.namespace
         if wrap:
-            headers["X-Vault-Wrap-TTL"] = wrap
+            headers["X-Vault-Wrap-TTL"] = str(wrap)
         return headers
 
     def _raise_status(self, res):
@@ -1138,7 +1139,7 @@ class AuthenticatedVaultClient(VaultClient):
         self.auth = auth
         super().__init__(url, **kwargs)
 
-    def is_valid(self, remote=True):
+    def token_valid(self, remote=True):
         """
         Check whether this client's authentication information is
         still valid.
@@ -1222,7 +1223,7 @@ class AuthenticatedVaultClient(VaultClient):
         if token is not None:
             payload["token"] = token
         elif accessor is not None:
-            endpoint += "accessor"
+            endpoint += "-accessor"
             payload["accessor"] = accessor
 
         res = self.post(endpoint, payload=payload)
@@ -1497,8 +1498,11 @@ class VaultLease:
                 # This is a hacky way to use inbuilt tools only (Python >=v3.7)
                 first, second = creation_time.split(".")
                 second, third = second.split("+")
-                if len(second) > 6:
+                second_off = 6 - len(second)
+                if second_off < 0:
                     second = second[:6]
+                elif second_off > 0:
+                    second = second + "0" * second_off
                 creation_time = int(
                     datetime.datetime.fromisoformat(
                         f"{first}.{second}+{third}"
@@ -1832,9 +1836,7 @@ class VaultKV:
         elif versions is not None:
             # semantically, for kv-v1 this resembles destroy
             if 0 not in versions:
-                raise salt.exceptions.SaltInvocationError(
-                    "Versions are not supported on kv-v1 paths."
-                )
+                raise VaultInvocationError("Versions are not supported on kv-v1 paths.")
             # if the latest version was requested to be deleted anyways, continue
             log.warning(
                 "Versions to destroy were requested, but the secret path does "
@@ -1854,9 +1856,7 @@ class VaultKV:
         versions = self._parse_versions(versions)
         v2_info = self.is_v2(path)
         if not v2_info["v2"]:
-            raise salt.exceptions.SaltInvocationError(
-                "Destroy operation requires kv-v2."
-            )
+            raise VaultInvocationError("Destroy operation requires kv-v2.")
         path = v2_info["destroy"]
         payload = {"versions": versions}
         return self.client.post(path, payload=payload)
@@ -1881,7 +1881,7 @@ class VaultKV:
         """
         v2_info = self.is_v2(path)
         if not v2_info["v2"]:
-            raise salt.exceptions.SaltInvocationError("Nuke operation requires kv-v2.")
+            raise VaultInvocationError("Nuke operation requires kv-v2.")
         path = v2_info["metadata"]
         return self.client.delete(path)
 
