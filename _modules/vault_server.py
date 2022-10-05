@@ -86,7 +86,7 @@ def _parse_args(args, include_equal=True):
 
 def is_initialized(vault_addr="https://127.0.0.1:8200"):
     # exit code: 0=yes 1=error 2=no
-    out = _vault("status", env=env, expect_error=True, vault_addr=vault_addr)
+    out = _vault("status", expect_error=True, vault_addr=vault_addr)
     return out["retcode"] == 0
 
 
@@ -131,7 +131,7 @@ def initialize(
         options.append(("root-token-pgp-key", root_token_pgp_key))
 
     out = _vault(
-        cmd, options=options, env=env, output_loglevel="quiet", vault_addr=vault_addr
+        cmd, options=options, output_loglevel="quiet", vault_addr=vault_addr
     )
 
     if pgp_keys_tmp:
