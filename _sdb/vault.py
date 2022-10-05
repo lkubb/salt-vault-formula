@@ -43,7 +43,6 @@ The above URI is analogous to running the following vault command:
 import logging
 
 import salt.exceptions
-# import salt.utils.vault
 import vaultutil as vault
 
 log = logging.getLogger(__name__)
@@ -73,8 +72,6 @@ def get(key, profile=None):
     """
     Get a value from the vault service
     """
-    if __opts__.get("_vault_runner_is_compiling_pillar_templates"):
-        return None
     full_path = key
     if "?" in key:
         path, key = key.split("?")

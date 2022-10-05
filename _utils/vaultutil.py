@@ -16,11 +16,13 @@ import string
 import time
 
 import requests
+
 import salt.cache
 import salt.crypt
 import salt.exceptions
 import salt.utils.data
 import salt.utils.dictupdate
+import salt.utils.http
 import salt.utils.json
 import salt.utils.versions
 
@@ -29,7 +31,7 @@ logging.getLogger("requests").setLevel(logging.WARNING)
 
 
 # Make __salt__ available globally to avoid loading minion_mods multiple times
-__salt__ = None
+__salt__ = {}
 
 
 def query(
@@ -98,7 +100,7 @@ def read_kv(path, opts, context, include_metadata=False):
         return kv.read(path, include_metadata=include_metadata)
     except (VaultAuthExpired, VaultPermissionDeniedError):
         # in case metadata lookups spend a use TODO: check if necessary
-        clear_cache(opts)
+        clear_cache(opts, context)
         kv = _get_kv(opts, context)
         return kv.read(path, include_metadata=include_metadata)
 
@@ -111,7 +113,7 @@ def write_kv(path, data, opts, context):
     try:
         return kv.write(path, data)
     except (VaultAuthExpired, VaultPermissionDeniedError):
-        clear_cache(opts)
+        clear_cache(opts, context)
         kv = _get_kv(opts, context)
         return kv.write(path, data)
 
@@ -124,7 +126,7 @@ def patch_kv(path, data, opts, context):
     try:
         return kv.patch(path, data)
     except (VaultAuthExpired, VaultPermissionDeniedError):
-        clear_cache(opts)
+        clear_cache(opts, context)
         kv = _get_kv(opts, context)
         return kv.patch(path, data)
 
@@ -138,7 +140,7 @@ def delete_kv(path, opts, context, versions=None):
     try:
         return kv.delete(path, versions=versions)
     except (VaultAuthExpired, VaultPermissionDeniedError):
-        clear_cache(opts)
+        clear_cache(opts, context)
         kv = _get_kv(opts, context)
         return kv.delete(path, versions=versions)
 
@@ -151,7 +153,7 @@ def destroy_kv(path, versions, opts, context):
     try:
         return kv.destroy(path, versions)
     except (VaultAuthExpired, VaultPermissionDeniedError):
-        clear_cache(opts)
+        clear_cache(opts, context)
         kv = _get_kv(opts, context)
         return kv.destroy(path, versions)
 
@@ -165,28 +167,54 @@ def list_kv(path, opts, context):
     try:
         return kv.list(path)
     except (VaultAuthExpired, VaultPermissionDeniedError):
-        clear_cache(opts)
+        clear_cache(opts, context)
         kv = _get_kv(opts, context)
         return kv.list(path)
 
 
 def _get_kv(opts, context):
     client, config = get_authd_client(opts, context, get_config=True)
-    cbank = _get_config_cache_bank() + "/connection"
+    ttl = None
+    connection = True
+    if config["cache"]["kv_metadata"] != "connection":
+        ttl = config["cache"]["kv_metadata"]
+        connection = False
+    cbank = _get_cache_bank(opts, connection=connection)
     ckey = "secret_path_metadata"
-    metadata_cache = VaultCache(config, opts, context, cbank, ckey)
+    metadata_cache = VaultCache(config, opts, context, cbank, ckey, ttl=ttl)
     return VaultKV(client, metadata_cache)
 
 
-def clear_cache(opts, ckey=None, connection_only=True):
+def clear_cache(opts, context, ckey=None, connection=True):
     """
-    Clears non-session cache.
+    Clears connection cache.
     """
+    cbank = _get_cache_bank(opts, connection=connection)
+    if cbank in context:
+        if ckey is None:
+            context.pop(cbank)
+        elif ckey in context[cbank]:
+            context[cbank].pop(ckey)
     cache = salt.cache.factory(opts)
-    cbank = _get_config_cache_bank(opts=opts)
-    if connection_only:
-        cbank += "/connection"
-    cache.flush(cbank, ckey)
+    if cache.contains(cbank, ckey):
+        return cache.flush(cbank, ckey)
+    local_opts = copy.copy(opts)
+    opts["cache"] = "localfs"
+    cache = salt.cache.factory(local_opts)
+    return cache.flush(cbank, ckey)
+
+
+def _get_cache_backend(config, opts):
+    if "session" == config["cache"]["backend"]:
+        return None
+    if config["cache"]["backend"] in ["localfs", "disk", "file"]:
+        # cache.Cache does not allow setting the type of cache by param
+        local_opts = copy.copy(opts)
+        local_opts["cache"] = "localfs"
+        return salt.cache.factory(local_opts)
+    # this should usually resolve to localfs as well on minions,
+    # but can be overridden by setting cache in the minion config
+    return salt.cache.factory(opts)
 
 
 def expand_pattern_lists(pattern, **mappings):
@@ -261,50 +289,47 @@ def _get_salt_run_type(opts):
     return SALT_RUNTYPE_MINION_REMOTE
 
 
-def _get_config_cache_bank(config=None, minion_id=None, opts=None, force_local=False):
-    if force_local:
-        # pillar compilation would otherwise leak tokens between master
-        # and minions
-        minion_id = None
-    elif minion_id is None and opts is not None:
-        if (
-            _get_salt_run_type(opts) == SALT_RUNTYPE_MASTER_IMPERSONATING
-            and not force_local
-        ):
-            minion_id = opts["grains"]["id"]
+def _get_cache_bank(opts, force_local=False, connection=True):
+    minion_id = None
+    # force_local is necessary because pillar compilation would otherwise
+    # leak tokens between master and minions
+    if (
+        not force_local
+        and _get_salt_run_type(opts) == SALT_RUNTYPE_MASTER_IMPERSONATING
+    ):
+        minion_id = opts["grains"]["id"]
     prefix = "vault" if minion_id is None else f"minions/{minion_id}/vault"
-    if config is None:
-        return prefix
-    url_key = config["url"].replace("://", "_")
-    ns_key = config["namespace"] or "__default_ns__"
-    ns_key.replace("/", "_")
-    return f"{prefix}/{url_key}/{ns_key}"
+    if connection:
+        return prefix + "/connection"
+    return prefix
 
 
 def get_authd_client(opts, context, force_local=False, get_config=False):
     """
     Returns an AuthenticatedVaultClient that is valid for at least one query.
     """
+    retry = False
     try:
         client, config = _build_authd_client(opts, context, force_local=force_local)
     except (VaultAuthExpired, VaultConfigExpired, VaultPermissionDeniedError):
-        clear_cache(opts)
-        client, config = _build_authd_client(opts, context, force_local=force_local)
+        retry = True
 
     # do not check the vault server for token validity because that consumes a use
-    if client.token_valid(remote=False):
-        if get_config:
-            return client, config
-        return client
+    if retry or not client.token_valid(remote=False):
+        clear_cache(opts, context)
+        client, config = _build_authd_client(opts, context, force_local=force_local)
+        if not client.token_valid(remote=False):
+            raise VaultException(
+                "Could not build valid client. This is most likely a bug."
+            )
 
-    client = _build_authd_client(opts, context, force_local=force_local)
     if get_config:
         return client, config
     return client
 
 
 def _build_authd_client(opts, context, force_local=False):
-    cbank = _get_config_cache_bank(opts=opts, force_local=force_local) + "/connection"
+    cbank = _get_cache_bank(opts, force_local=force_local)
     config, embedded_token = _get_connection_config(
         cbank, opts, context, force_local=force_local
     )
@@ -315,6 +340,7 @@ def _build_authd_client(opts, context, force_local=False):
     if config["auth"]["method"] == "approle":
         secret_id = config["auth"]["secret_id"] or None
         cached_token = token_cache.get(10)
+        secret_id_cache = None
         if secret_id:
             secret_id_cache = VaultAuthCache(
                 config, opts, context, cbank, "secret_id", VaultAppRoleSecretId
@@ -338,6 +364,7 @@ def _build_authd_client(opts, context, force_local=False):
             approle,
             unauthd_client,
             mount=config["auth"]["approle_mount"],
+            cache=secret_id_cache,
             token_store=token_auth,
         )
         client = AuthenticatedVaultClient(auth, **config["server"])
@@ -358,48 +385,57 @@ def _build_authd_client(opts, context, force_local=False):
 
 
 def _get_connection_config(cbank, opts, context, force_local=False):
-    def cache_or_fetch(cbank, opts, context):
-        if cbank in context and "config" in context[cbank]:
-            return context[cbank]["config"]
-        cache = salt.cache.factory(opts)
-        if cache.contains(cbank, "config"):
-            config = cache.fetch(cbank, "config")
-            config_ttl = config.get("cache", {}).get("config", 60)
-            config_updated = cache.updated(cbank, "config")
-            if int(time.time()) - config_updated < config_ttl:
-                log.debug("Using cached Vault server connection configuration.")
-                return config, None
-            log.debug("Cached config outdated, flushing connection config cache.")
-            # reset all connection-scoped data
-            cache.flush(cbank)
-
-        log.debug("Using new Vault server connection configuration.")
-        config = _query_master(
-            "get_config", opts, issue_params=opts.get("vault", {}).get("issue_params")
-        )
-        config = parse_config(config)
-        # do not couple token cache with configuration cache
-        embedded_token = config["auth"].pop("token", None)
-        config = {
-            "auth": config["auth"],
-            "cache": config["cache"],
-            "server": config["server"],
-        }
-        if "session" == config["cache"]["backend"]:
-            # reset all connection-scoped data
-            context[cbank] = {"config": config}
-        else:
-            cache.store(cbank, "config", config)
-        return config, embedded_token
-
-    runtype = _get_salt_run_type(opts)
-
-    if runtype in [SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL] or force_local:
+    if (
+        _get_salt_run_type(opts) in [SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL]
+        or force_local
+    ):
         # only cache config fetched from remote
         return _use_local_config(opts)
 
     log.debug("Using Vault server connection configuration from remote.")
-    return cache_or_fetch(cbank, opts, context)
+    config_cache = _get_config_cache(opts, context, cbank, "config")
+
+    # In case cached data is available, this takes care of resetting
+    # all connection-scoped data if the config is outdated.
+    config = config_cache.get()
+    if config is not None:
+        log.debug("Using cached Vault server connection configuration.")
+        return config, None
+
+    log.debug("Using new Vault server connection configuration.")
+    config = _query_master(
+        "get_config",
+        opts,
+        issue_params=parse_config(opts.get("vault", {}), validate=False)["issue_params"]
+        or None,
+    )
+    config = parse_config(config, opts=opts)
+    if config["server"]["verify"] is None:
+        # make sure local verify settings are respected in case the master did not
+        # send them
+        config["server"]["verify"] = parse_config(
+            opts.get("vault", {}), validate=False
+        )["server"]["verify"]
+    # do not couple token cache with configuration cache
+    embedded_token = config["auth"].pop("token", None)
+    config = {
+        "auth": config["auth"],
+        "cache": config["cache"],
+        "server": config["server"],
+    }
+    config_cache.store(config)
+    return config, embedded_token
+
+
+def _use_local_config(opts):
+    log.debug("Using Vault connection details from local config.")
+    config = parse_config(opts.get("vault", {}), opts=opts)
+    embedded_token = config["auth"].pop("token", None)
+    return {
+        "auth": config["auth"],
+        "cache": config["cache"],
+        "server": config["server"],
+    }, embedded_token
 
 
 def _fetch_secret_id(config, opts, secret_id_cache, force_local=False):
@@ -416,10 +452,12 @@ def _fetch_secret_id(config, opts, secret_id_cache, force_local=False):
             unwrap_expected_creation_path=_get_expected_creation_path(
                 "secret_id", config
             ),
-            issue_params=opts.get("vault", {}).get("issue_params"),
+            issue_params=parse_config(opts.get("vault", {}), validate=False)[
+                "issue_params"
+            ]
+            or None,
         )
         secret_id = VaultAppRoleSecretId(**secret_id["data"])
-
         # do not cache single-use secret-ids
         if secret_id.secret_id_num_uses != 1:
             secret_id_cache.store(secret_id)
@@ -438,11 +476,12 @@ def _fetch_secret_id(config, opts, secret_id_cache, force_local=False):
                     expected_creation_path=_get_expected_creation_path(
                         "secret_id", config
                     ),
-                )["data"]
-            return VaultAppRoleSecretId(**secret_id)
+                )
+                secret_id = secret_id["data"]
+            return LocalVaultAppRoleSecretId(**secret_id)
         if secret_id:
             # assume locally configured secret_ids do not expire
-            return VaultAppRoleSecretId(
+            return LocalVaultAppRoleSecretId(
                 config["auth"]["secret_id"],
                 secret_id_ttl=config["cache"]["config"],
                 secret_id_num_uses=None,
@@ -474,7 +513,10 @@ def _fetch_token(config, opts, token_cache, force_local=False, embedded_token=No
                 unwrap_expected_creation_path=_get_expected_creation_path(
                     "token", config
                 ),
-                issue_params=opts.get("vault", {}).get("issue_params"),
+                issue_params=parse_config(opts.get("vault", {}), validate=False)[
+                    "issue_params"
+                ]
+                or None,
             )
             token = VaultToken(**token["auth"])
 
@@ -489,18 +531,21 @@ def _fetch_token(config, opts, token_cache, force_local=False, embedded_token=No
         if isinstance(embedded_token, dict):
             if embedded_token.get("wrap_info"):
                 unauthd_client = VaultClient(**config["server"])
-                token = unauthd_client.unwrap(
+                embedded_token = unauthd_client.unwrap(
                     embedded_token["wrap_info"]["token"],
                     expected_creation_path=_get_expected_creation_path("token", config),
                 )["auth"]
             token = VaultToken(**embedded_token)
         elif config["auth"]["method"] == "wrapped_token":
             unauthd_client = VaultClient(**config["server"])
-            token = unauthd_client.unwrap(
+            embedded_token = unauthd_client.unwrap(
                 embedded_token,
                 expected_creation_path=_get_expected_creation_path("token", config),
             )["auth"]
+            token = VaultToken(**embedded_token)
         elif embedded_token is not None:
+            # if the embedded plain token info has been cached before, don't repeat
+            # the query unnecessarily
             token = token_cache.get()
             if token is None or embedded_token != str(token):
                 # lookup and verify raw token
@@ -510,7 +555,10 @@ def _fetch_token(config, opts, token_cache, force_local=False, embedded_token=No
                     raise VaultException(
                         "Configured token cannot be verified. It is most likely expired or invalid."
                     )
-                token = VaultToken(**token_info.json()["data"])
+                token_meta = token_info.json()["data"]
+                token = VaultToken(
+                    embedded_token, lease_duration=token_meta["ttl"], **token_meta
+                )
                 token_cache.store(token)
         if token is not None:
             return token
@@ -535,11 +583,16 @@ def _query_master(
         unwrap_expected_creation_path=None,
     ):
         if not result:
+            nonlocal func
             log.error(
                 "Failed to get Vault connection from master! No result returned - "
-                "is the peer publish configuration correct?"
+                "does the peer runner publish configuration include `%s`?",
+                func,
             )
-            raise salt.exceptions.CommandExecutionError(result)
+            # Expire configuration in case this is the result of an auth method change.
+            raise VaultConfigExpired(
+                f"Peer runner return was empty. Make sure {func} is listed in the master peer_run config."
+            )
         if not isinstance(result, dict):
             log.error(
                 "Failed to get Vault connection from master! Response is not a dict: %s",
@@ -552,25 +605,37 @@ def _query_master(
                 result["error"],
             )
             if result.get("expire_cache"):
+                log.warning("Master returned error and requested cache expiration.")
                 raise VaultConfigExpired()
             raise salt.exceptions.CommandExecutionError(result)
 
         config_expired = False
 
-        if result.get("expire_cache") or (
-            expected_server is not None and result.get("server", {}) != expected_server
-        ):
+        if result.get("expire_cache", False):
+            log.info("Master requested Vault config expiration.")
+            config_expired = True
+
+        reported_server = parse_config(result.get("server", {}), validate=False)[
+            "server"
+        ]
+        if "server" in result:
+            result.update({"server": reported_server})
+
+        if expected_server is not None and result.get("server") != expected_server:
+            log.info(
+                "Mismatch of cached and reported server data detected. Invalidating cache."
+            )
             # make sure to fetch wrapped data anyways for security reasons
             config_expired = True
+            unwrap_expected_creation_path = None
 
         # this is used to augment some vault responses with data fetched by the master
         # e.g. secret_id_num_uses
         misc_data = result.get("misc_data", {})
 
-        if "wrap_info" in result or result.get("wrap_info_nested"):
-            if (
-                unwrap_client is not None
-                and unwrap_client.get_config() != result["server"]
+        if result.get("wrap_info") or result.get("wrap_info_nested"):
+            if unwrap_client is not None and unwrap_client.get_config() != result.get(
+                "server"
             ):
                 unwrap_client = None
                 # make sure to fetch wrapped data anyways for security reasons
@@ -608,15 +673,24 @@ def _query_master(
             raise VaultConfigExpired()
 
         for key, val in misc_data.items():
-            if key not in result["data"]:
-                result["data"][key] = val
+            tgt = "data" if result.get("data") is not None else "auth"
+            if (
+                salt.utils.data.traverse_dict_and_list(result, f"{tgt}:{key}", "__unset__")
+                == "__unset__"
+            ):
+                salt.utils.dictupdate.set_dict_key_value(
+                    result,
+                    f"{tgt}:{key}",
+                    val,
+                )
 
         result.pop("wrap_info", None)
+        result.pop("wrap_info_nested", None)
         result.pop("misc_data", None)
         return result
 
     global __salt__  # pylint: disable=global-statement
-    if __salt__ is None:
+    if not __salt__:
         __salt__ = salt.loader.minion_mods(opts)
 
     minion_id = opts["grains"]["id"]
@@ -627,7 +701,9 @@ def _query_master(
     if opts.get("__role", "minion") == "minion":
         private_key = f"{pki_dir}/minion.pem"
         log.debug(
-            f"Running on minion, signing request `vault.{func}` with key {private_key}",
+            "Running on minion, signing request `vault.%s` with key %s",
+            func,
+            private_key,
         )
         signature = base64.b64encode(salt.crypt.sign_message(private_key, minion_id))
         arg = [
@@ -642,8 +718,10 @@ def _query_master(
     else:
         private_key = f"{pki_dir}/master.pem"
         log.debug(
-            f"Running on master, signing request `vault.{func}` for {minion_id} "
-            f"with key {private_key}",
+            "Running on master, signing request `vault.%s` for %s with key %s",
+            func,
+            minion_id,
+            private_key,
         )
         signature = base64.b64encode(salt.crypt.sign_message(private_key, minion_id))
         result = __salt__["saltutil.runner"](
@@ -661,18 +739,7 @@ def _query_master(
     )
 
 
-def _use_local_config(opts):
-    log.debug("Using Vault connection details from local config.")
-    config = parse_config(opts.get("vault", {}))
-    embedded_token = config["auth"].pop("token", None)
-    return {
-        "auth": config["auth"],
-        "cache": config["cache"],
-        "server": config["server"],
-    }, embedded_token
-
-
-def parse_config(config):
+def parse_config(config, validate=True, opts=None):
     """
     Returns a vault configuration dictionary that has all
     keys with defaults. Checks if required data is available.
@@ -687,6 +754,7 @@ def parse_config(config):
         "cache": {
             "backend": "session",
             "config": 3600,
+            "kv_metadata": "connection",
             "secret": "ttl",
         },
         "issue": {
@@ -716,7 +784,7 @@ def parse_config(config):
             "entity": {
                 "minion-id": "{minion}",
             },
-            "token": {
+            "secret": {
                 "saltstack-jid": "{jid}",
                 "saltstack-minion": "{minion}",
                 "saltstack-user": "{user}",
@@ -738,8 +806,7 @@ def parse_config(config):
     try:
         # Policy generation has params, the new config groups them together.
         if isinstance(config.get("policies", {}), list):
-            policies_list = config["policies"]
-            config["policies"] = {"assign": policies_list}
+            config["policies"] = {"assign": config["policies"]}
         merged = salt.utils.dictupdate.merge(
             default_config,
             config,
@@ -766,16 +833,25 @@ def parse_config(config):
             merged["issue"]["allow_minion_override_params"] = merged["auth"][
                 "allow_minion_override"
             ]
+        if merged["server"]["verify"] == "default":
+            merged["server"]["verify"] = salt.utils.http.get_ca_bundle(opts)
+        if not validate:
+            return merged
         if merged["auth"]["method"] == "approle":
             if "role_id" not in merged["auth"]:
                 raise AssertionError("auth:role_id is required for approle auth")
         elif merged["auth"]["method"] == "token":
             if "token" not in merged["auth"]:
                 raise AssertionError("auth:token is required for token auth")
+        else:
+            raise AssertionError(
+                f"`{merged['auth']['method']}` is not a valid auth method."
+            )
+
         if "url" not in merged["server"]:
             raise AssertionError("server:url is required")
     except AssertionError as err:
-        raise salt.exceptions.CommandExecutionError(
+        raise salt.exceptions.InvalidConfigError(
             f"Invalid vault configuration: {err}"
         ) from err
     return merged
@@ -787,21 +863,21 @@ def _get_expected_creation_path(secret_type, config=None):
 
     if "secret_id" == secret_type:
         if config is not None:
-            return "auth/{}/role/{}/secret-id".format(
+            return r"auth/{}/role/{}/secret\-id".format(
                 re.escape(config["auth"]["approle_mount"]),
                 re.escape(config["auth"]["approle_name"]),
             )
-        return r"auth/[^/]+/role/[^/]+/secret-id"
+        return r"auth/[^/]+/role/[^/]+/secret\-id"
 
     if "role_id" == secret_type:
         if config is not None:
-            return "auth/{}/role/{}/role-id".format(
+            return r"auth/{}/role/{}/role\-id".format(
                 re.escape(config["auth"]["approle_mount"]),
                 re.escape(config["auth"]["approle_name"]),
             )
-        return r"auth/[^/]+/role/[^/]+/role-id"
+        return r"auth/[^/]+/role/[^/]+/role\-id"
 
-    raise salt.exceptions.SaltInvocationError(
+    raise VaultInvocationError(
         f"secret_type must be one of token, secret_id, role_id, got `{secret_type}`."
     )
 
@@ -975,7 +1051,7 @@ class VaultClient:
         if not res.ok:
             if raise_error:
                 self._raise_status(res)
-            return data or False
+            return data
         if wrap:
             return VaultWrappedResponse(**data["wrap_info"])
         return data
@@ -1253,24 +1329,32 @@ class VaultCache:
     like secret path metadata.
     """
 
-    def __init__(self, config, opts, context, cbank, ckey):
+    def __init__(self, config, opts, context, cbank, ckey, ttl=None, cache=None):
         self.config = config
         self.opts = opts
         self.context = context
         self.cbank = cbank
         self.ckey = ckey
-        cache = None
-        if config["cache"]["backend"] != "session":
-            cache = salt.cache.factory(opts)
-        self.cache = cache
+        self.ttl = ttl
+        self.cache = cache if cache is not None else _get_cache_backend(config, opts)
 
     def exists(self):
         """
         Check whether data for this domain exists
         """
+        if self.cbank in self.context and self.ckey in self.context[self.cbank]:
+            return True
         if self.cache is not None:
-            return self.cache.contains(self.cbank, self.ckey)
-        return self.cbank in self.context and self.ckey in self.context[self.cbank]
+            if not self.cache.contains(self.cbank, self.ckey):
+                return False
+            if self.ttl is not None:
+                updated = self.cache.updated(self.cbank, self.ckey)
+                if int(time.time()) - updated >= self.ttl:
+                    log.debug("Cached data outdated, flushing.")
+                    self.flush()
+                    return False
+            return True
+        return False
 
     def get(self):
         """
@@ -1278,9 +1362,11 @@ class VaultCache:
         """
         if not self.exists():
             return None
+        if self.cbank in self.context and self.ckey in self.context[self.cbank]:
+            return self.context[self.cbank][self.ckey]
         if self.cache is not None:
             return self.cache.fetch(self.cbank, self.ckey)
-        return self.context[self.cbank][self.ckey]
+        raise RuntimeError("This code path should not have been hit.")
 
     def flush(self):
         """
@@ -1288,7 +1374,7 @@ class VaultCache:
         """
         if self.cache is not None:
             self.cache.flush(self.cbank, self.ckey)
-        else:
+        if self.cbank in self.context:
             self.context[self.cbank].pop(self.ckey, None)
 
     def store(self, value):
@@ -1297,10 +1383,91 @@ class VaultCache:
         """
         if self.cache is not None:
             self.cache.store(self.cbank, self.ckey, value)
-            return
         if self.cbank not in self.context:
             self.context[self.cbank] = {}
         self.context[self.cbank][self.ckey] = value
+
+
+def _get_config_cache(opts, context, cbank, ckey):
+    """
+    Factory for VaultConfigCache to get around some
+    chicken-and-egg problems
+    """
+    config = None
+    if cbank in context and ckey in context[cbank]:
+        config = context[cbank][ckey]
+    else:
+        cache = salt.cache.factory(opts)
+        if cache.contains(cbank, ckey):
+            # expiration check is done inside the class
+            config = cache.fetch(cbank, ckey)
+        elif opts.get("cache", "localfs") != "localfs":
+            local_opts = copy.copy(opts)
+            local_opts["cache"] = "localfs"
+            cache = salt.cache.factory(local_opts)
+            if cache.contains(cbank, ckey):
+                # expiration check is done inside the class
+                config = cache.fetch(cbank, ckey)
+
+    return VaultConfigCache(opts, context, cbank, ckey, init_config=config)
+
+
+class VaultConfigCache(VaultCache):
+    def __init__(
+        self, opts, context, cbank, ckey, init_config=None
+    ):  # pylint: disable=super-init-not-called
+        self.opts = opts
+        self.context = context
+        self.cbank = cbank
+        self.ckey = ckey
+        self.config = None
+        self.cache = None
+        self.ttl = None
+        if init_config is not None:
+            self._load(init_config)
+
+    def exists(self):
+        if self.config is None:
+            return False
+        return super().exists()
+
+    def get(self):
+        if self.config is None:
+            return None
+        return super().get()
+
+    def flush(self):
+        """
+        Flush all connection-scoped data
+        """
+        if self.config is None:
+            log.warning(
+                "Tried to flush uninitialized configuration cache. Skipping flush."
+            )
+            return
+        # flush the whole connection-scoped cache
+        if self.cache is not None:
+            self.cache.flush(self.cbank)
+        if self.cbank in self.context:
+            self.context.pop(self.cbank, None)
+        self.config = None
+        self.cache = None
+        self.ttl = None
+
+    def _load(self, config):
+        if self.config is not None:
+            if (
+                self.config["cache"]["backend"] != "session"
+                and self.config["cache"]["backend"] != config["cache"]["backend"]
+            ):
+                self.flush()
+        self.config = config
+        self.cache = _get_cache_backend(self.config, self.opts)
+        self.ttl = self.config["cache"]["config"]
+
+    def store(self, value):
+        self._load(value)
+        super().store(value)
 
 
 class VaultAuthCache(VaultCache):
@@ -1309,27 +1476,21 @@ class VaultAuthCache(VaultCache):
     the cached secrets are still valid before returning.
     """
 
-    def __init__(self, config, opts, context, cbank, ckey, auth_cls):
-        super().__init__(config, opts, context, cbank, ckey)
+    def __init__(self, config, opts, context, cbank, ckey, auth_cls, ttl=None):
+        if ttl is None:
+            if config["cache"]["secret"] != "ttl":
+                ttl = config["cache"]["secret"]
+        super().__init__(config, opts, context, cbank, ckey, ttl=ttl)
         self.auth_cls = auth_cls
-        self.max_cache_time = config["cache"]["secret"]
 
-    def get(self, seconds_future=0):
+    def get(self, seconds_future=0):  # pylint: disable=arguments-differ
         """
         Returns valid cached authentication data or None
         """
         if not self.exists():
             return None
-        if self.cache is not None:
-            if "ttl" != self.max_cache_time:
-                last_updated = self.cache.updated(self.cbank, self.ckey)
-                if int(time.time()) - last_updated > self.max_cache_time:
-                    log.debug("Cached secret outdated because of absolute config.")
-                    self.flush()
-                    return None
-            auth = self.auth_cls(**self.cache.fetch(self.cbank, self.ckey))
-        else:
-            auth = self.auth_cls(**self.context[self.cbank][self.ckey])
+        data = super().get()
+        auth = self.auth_cls(**data)
         if auth.is_valid(seconds_future):
             log.debug("Using cached secret.")
             return auth
@@ -1357,6 +1518,8 @@ class VaultTokenAuth:
             token = cache.get()
         if token is None:
             token = InvalidVaultToken()
+        if isinstance(token, dict):
+            token = VaultToken(**token)
         self.token = token
 
     def is_renewable(self):
@@ -1405,7 +1568,10 @@ class VaultTokenAuth:
 
     def _write_cache(self):
         if self.cache is not None:
-            self.cache.store(self.token)
+            if self.token.is_valid():
+                self.cache.store(self.token)
+            else:
+                self.cache.flush()
 
 
 class VaultAppRoleAuth:
@@ -1413,10 +1579,11 @@ class VaultAppRoleAuth:
     Issues tokens from AppRole credentials.
     """
 
-    def __init__(self, approle, client, mount="approle", token_store=None):
+    def __init__(self, approle, client, mount="approle", cache=None, token_store=None):
         self.approle = approle
         self.client = client
         self.mount = mount
+        self.cache = cache
         if token_store is None:
             token_store = VaultTokenAuth()
         self.token = token_store
@@ -1466,9 +1633,21 @@ class VaultAppRoleAuth:
         endpoint = f"auth/{self.mount}/login"
         payload = self.approle.payload()
         res = self.client.post(endpoint, payload=payload)
-        self.approle.secret_id.used()
+        self.approle.used()
         self._replace_token(res["auth"])
+        self._write_cache()
         return self.token.get_token()
+
+    def _write_cache(self):
+        if self.cache is not None and self.approle.secret_id is not None:
+            if isinstance(self.approle.secret_id, LocalVaultAppRoleSecretId):
+                pass
+            elif self.approle.secret_id.secret_id_num_uses == 0:
+                pass
+            elif self.approle.is_valid():
+                self.cache.store(self.approle.secret_id)
+            else:
+                self.cache.flush()
 
     def _replace_token(self, auth):
         self.token.replace_token(VaultToken(**auth))
@@ -1494,21 +1673,10 @@ class VaultLease:
             try:
                 creation_time = int(creation_time)
             except ValueError:
-                # Most endpoints respond with RFC3339-formatted strings
-                # This is a hacky way to use inbuilt tools only (Python >=v3.7)
-                first, second = creation_time.split(".")
-                second, third = second.split("+")
-                second_off = 6 - len(second)
-                if second_off < 0:
-                    second = second[:6]
-                elif second_off > 0:
-                    second = second + "0" * second_off
-                creation_time = int(
-                    datetime.datetime.fromisoformat(
-                        f"{first}.{second}+{third}"
-                    ).timestamp()
-                )
-        self.creation_time = creation_time or int(round(time.time()))
+                creation_time = _fromisoformat(creation_time)
+        self.creation_time = (
+            creation_time if creation_time is not None else int(round(time.time()))
+        )
 
     def is_valid(self, seconds_future=0):
         """
@@ -1536,11 +1704,53 @@ class VaultLease:
     def __repr__(self):
         return repr(self.to_dict())
 
+    def __eq__(self, other):
+        try:
+            data = other.__dict__
+        except AttributeError:
+            data = other
+        return self.__dict__ == data
+
     def to_dict(self):
         """
         Return a dict of all contained attributes
         """
         return self.__dict__
+
+
+def _fromisoformat(creation_time):
+    """
+    Most endpoints respond with RFC3339-formatted strings
+    This is a hacky way to use inbuilt tools only
+    """
+    # drop subsecond precision to make it easier on us
+    # (length would need to be 3, 6 or 9)
+    creation_time = re.sub(r"\.[\d]+", "", creation_time)
+    creation_time = re.sub(r"Z$", "+00:00", creation_time)
+    try:
+        # Python >=v3.7
+        return int(datetime.datetime.fromisoformat(creation_time).timestamp())
+    except AttributeError:
+        # Python < v3.7
+        dstr, tstr = creation_time.split("T")
+        year = int(dstr[:4])
+        month = int(dstr[5:7])
+        day = int(dstr[8:10])
+        hour = int(tstr[:2])
+        minute = int(tstr[3:5])
+        second = int(tstr[6:8])
+        tz_pos = (tstr.find("-") + 1 or tstr.find("+") + 1) - 1
+        tz_hour = int(tstr[tz_pos + 1 : tz_pos + 3])
+        tz_minute = int(tstr[tz_pos + 4 : tz_pos + 6])
+        if all(x == 0 for x in (tz_hour, tz_minute)):
+            tz = datetime.timezone.utc
+        else:
+            tz_sign = -1 if "-" == tstr[tz_pos] else 1
+            td = datetime.timedelta(hours=tz_hour, minutes=tz_minute)
+            tz = datetime.timezone(tz_sign * td)
+        return int(
+            datetime.datetime(year, month, day, hour, minute, second, 0, tz).timestamp()
+        )
 
 
 class VaultWrappedResponse(VaultLease):
@@ -1570,6 +1780,16 @@ class VaultWrappedResponse(VaultLease):
         )
         self.token = self.id
         self.ttl = self.lease_duration
+
+    def serialize_for_minion(self):
+        return {
+            "wrap_info": {
+                "token": self.id,
+                "ttl": self.ttl,
+                "creation_time": self.creation_time,
+                "creation_path": self.creation_path,
+            },
+        }
 
 
 class VaultAppRoleSecretId(VaultLease):
@@ -1637,6 +1857,12 @@ class VaultAppRoleSecretId(VaultLease):
         if self.secret_id_num_uses is not None:
             data["secret_id_num_uses"] = self.secret_id_num_uses
         return data
+
+
+class LocalVaultAppRoleSecretId(VaultAppRoleSecretId):
+    """
+    Represents a secret ID from local configuration and should not be cached.
+    """
 
 
 class VaultToken(VaultLease):
@@ -1734,6 +1960,10 @@ class VaultAppRole:
             return True
         return self.secret_id.is_valid(seconds_future)
 
+    def used(self):
+        if self.secret_id is not None:
+            self.secret_id.used()
+
     def payload(self):
         """
         Return the payload to use for POST requests using this AppRole
@@ -1746,15 +1976,17 @@ class VaultAppRole:
 
 
 class InvalidVaultToken(VaultToken):
-    def __init__(self, *args, **kwargs):
-        pass
+    def __init__(self, *args, **kwargs):  # pylint: disable=super-init-not-called
+        self.renewable = False
+        self.use_count = 0
+        self.num_uses = 0
 
     def is_valid(self, seconds_future=0):
         return False
 
 
 class InvalidVaultAppRoleSecretId(VaultAppRoleSecretId):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs):  # pylint: disable=super-init-not-called
         pass
 
     def is_valid(self, seconds_future=0):
@@ -1834,14 +2066,7 @@ class VaultKV:
                 # data and delete operations only differ by HTTP verb
                 path = v2_info["data"]
         elif versions is not None:
-            # semantically, for kv-v1 this resembles destroy
-            if 0 not in versions:
-                raise VaultInvocationError("Versions are not supported on kv-v1 paths.")
-            # if the latest version was requested to be deleted anyways, continue
-            log.warning(
-                "Versions to destroy were requested, but the secret path does "
-                "not use kv-v2. Deleting the secret only."
-            )
+            raise VaultInvocationError("Versioning support requires kv-v2.")
 
         return self.client.request(method, path, payload=payload)
 
@@ -1977,7 +2202,7 @@ class VaultKV:
                     cache_content[path] = ret = res["data"]
                     self.metadata_cache.store(cache_content)
                 else:
-                    raise res
+                    raise VaultException("Unexpected response to metadata query.")
             except Exception as err:  # pylint: disable=broad-except
                 log.error(
                     "Failed to get secret metadata %s: %s", type(err).__name__, err
@@ -2009,7 +2234,7 @@ def get_vault_connection():
     try:
         token = vault.auth.get_token()
     except (VaultAuthExpired, VaultPermissionDeniedError):
-        clear_cache(opts)
+        clear_cache(opts, context)
         vault = get_authd_client(opts, context)
         token = vault.auth.get_token()
 
@@ -2033,7 +2258,11 @@ def del_cache():
         "Argon",
         "salt.utils.vault.del_cache is deprecated, please use salt.utils.vault.clear_cache.",
     )
-    clear_cache(globals().get("__opts__", {}), connection_only=False)
+    clear_cache(
+        globals().get("__opts__", {}),
+        globals().get("__context__", {}),
+        connection=False,
+    )
 
 
 def write_cache(connection):  # pylint: disable=unused-argument
@@ -2095,30 +2324,3 @@ def make_request(
         response.status_code = 403
         response.reason = "Permission denied"
         return response
-
-
-def selftoken_expired():
-    """
-    Validate the current token exists and is still valid
-    """
-    salt.utils.versions.warn_until(
-        "Argon",
-        "salt.utils.vault.selftoken_expired is deprecated, please rely on the "
-        "utility module for token management.",
-    )
-    opts = globals().get("__opts__", {})
-    context = globals().get("__context__", {})
-
-    try:
-        if _get_salt_run_type(opts) in [
-            SALT_RUNTYPE_MASTER_IMPERSONATING,
-            SALT_RUNTYPE_MINION_REMOTE,
-        ]:
-            return True
-        vault = get_authd_client(opts, context)
-        return vault.is_valid(remote=True)
-
-    except Exception as err:  # pylint: disable=broad-except
-        raise salt.exceptions.CommandExecutionError(
-            "Error while looking up self token."
-        ) from err

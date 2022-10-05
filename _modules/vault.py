@@ -190,6 +190,7 @@ All possible master configuration options with defaults:
       cache:
         backend: session
         config: 3600
+        kv_metadata: connection
         secret: ttl
       issue:
         allow_minion_override_params: false
@@ -212,7 +213,7 @@ All possible master configuration options with defaults:
       metadata:
         entity:
           minion-id: '{minion}'
-        token:
+        secret:
           saltstack-jid: '{jid}'
           saltstack-minion: '{minion}'
           saltstack-user: '{user}'
@@ -294,9 +295,12 @@ backend
         This used to be found in ``auth:token_backend``.
 
     The cache backend in use. Defaults to ``session``, which will store the
-    vault information in memory only for that session. Setting this to anything
-    else will use the configured cache for minion data (:conf_master:`cache <cache>`),
-    by default the local filesystem.
+    vault information in memory only for that session.
+    ``disk``/``file``/``localfs`` will force using the localfs driver, regardless
+    of configured minion data cache.
+    Setting this to anything else will use the default configured cache for
+    minion data (:conf_master:`cache <cache>`), by default the local filesystem
+    as well.
 
 config
     .. versionadded:: pending_pr
@@ -304,11 +308,21 @@ config
     The time in seconds to cache queried configuration from the master.
     Defaults to 3600 (1h).
 
+kv_metadata
+    .. versionadded:: pending_pr
+
+    The time in seconds to cache KV metadata used to determine if a path
+    is using version 1/2 for. Defaults to "connection", which will clear
+    the metadata cache once a new configuration is requested from the
+    master. Setting this to ``None``/``null`` will keep the information
+    indefinitely until the cache is cleared.
+
 secret
     .. versionadded:: pending_pr
 
     The time in seconds to cache tokens/secret-ids for. Defaults to ``ttl``,
-    which caches the secret for as long as it is valid.
+    which caches the secret for as long as it is valid, unless a new configuration
+    is requested from the master.
 
 ``issue``
 ~~~~~~~~~
@@ -405,7 +419,7 @@ wrap
 ~~~~~~~~~~~~
 .. versionadded:: pending_pr
 
-Configures metadata for the issued secrets. Values have to be strings and can
+Configures metadata for the issued entities/secrets. Values have to be strings and can
 be templated with the following variables:
 
 - ``{jid}`` Salt job ID that issued the secret.
@@ -417,14 +431,16 @@ be templated with the following variables:
 .. note::
 
     Values have to be strings, hence templated variables that resolve to lists
-    will be concatenated to an alphabetically sorted comma-separated list.
+    will be concatenated to a lexicographically sorted comma-separated list
+    (Python ``list.sort()``).
 
 entity
     Configures the metadata associated with the minion entity inside Vault.
     Entities are only created when issuing AppRoles to minions.
 
-token
-    Configures the metadata associated with issued tokens.
+secret
+    Configures the metadata associated with issued tokens/secret IDs. They
+    are logged in plaintext to the Vault audit log.
 
 ``policies``
 ~~~~~~~~~~~~
@@ -474,11 +490,24 @@ cache_time
     This is important when using pillar values in templates, since compiling
     the pillar is an expensive operation.
 
+    .. note::
+
+        Only effective (and sensible) when issuing tokens to minions. Token policies
+        need to be compiled every time a token is requested, while AppRole-associated
+        policies are written to Vault configuration the first time authentication data
+        is requested (they can be refreshed on demand by running
+        ``salt-run vault.sync_approles``).
+
+        They will also be refreshed in case other issuance parameters are changed
+        (such as uses/ttl), either on the master or the minion
+        (if allow_minion_override_params is True).
+
 refresh_pillar
     .. versionadded:: pending_pr
 
     Whether to refresh the minion pillar when compiling templated policies
     that contain pillar variables.
+    Only effective when issuing tokens to minions (see note on cache_time above).
 
     - ``null`` (default) only compiles the pillar when no cached pillar is found.
     - ``false`` never compiles the pillar. This means templated policies that
@@ -487,6 +516,8 @@ refresh_pillar
       on the master since the compilation is costly.
 
     .. note::
+
+        Hardcoded to True when issuing AppRoles.
 
         Using cached pillar data only (refresh_pillar=False) might cause the policies
         to be out of sync. If there is no cached pillar data available for the minion,
@@ -508,7 +539,7 @@ refresh_pillar
 Configures Vault server details.
 
 url
-    Url to your Vault installation. Required.
+    URL to your Vault installation. Required.
 
 verify
     For details please see
@@ -516,10 +547,15 @@ verify
 
     .. versionadded:: 2018.3.0
 
+    .. versionchanged:: pending_pr
+
+        Setting this value to ``default`` will autodiscover the platform default
+        CA bundle using ``salt.utils.http.get_ca_bundle``.
+
 namespace
     Optional Vault namespace. Used with Vault Enterprise.
 
-    For detail please see:
+    For details please see:
     https://www.vaultproject.io/docs/enterprise/namespaces
 
     .. versionadded:: 3004
@@ -528,9 +564,8 @@ namespace
 """
 import logging
 
-# import salt.utils.vault
 import vaultutil as vault
-from salt.exceptions import CommandExecutionError, SaltException
+from salt.exceptions import CommandExecutionError, SaltException, SaltInvocationError
 
 log = logging.getLogger(__name__)
 
@@ -586,7 +621,7 @@ def read_secret(path, key=None, metadata=False, default=None):
         default = CommandExecutionError
     if key is not None:
         metadata = False
-    log.debug("Reading Vault secret for %s at %s", __grains__["id"], path)
+    log.debug("Reading Vault secret for %s at %s", __grains__.get("id"), path)
     try:
         data = vault.read_kv(path, __opts__, __context__, include_metadata=metadata)
         if key is not None:
@@ -627,11 +662,13 @@ def write_secret(path, **kwargs):
     path
         The path to the secret, including mount.
     """
-    log.debug("Writing vault secrets for %s at %s", __grains__["id"], path)
+    log.debug("Writing vault secrets for %s at %s", __grains__.get("id"), path)
     data = {x: y for x, y in kwargs.items() if not x.startswith("__")}
     try:
-        vault.write_kv(path, data, __opts__, __context__)
-        return True
+        res = vault.write_kv(path, data, __opts__, __context__)
+        if isinstance(res, dict):
+            return res["data"]
+        return res
     except Exception as err:  # pylint: disable=broad-except
         log.error("Failed to write secret! %s: %s", type(err).__name__, err)
         return False
@@ -655,10 +692,12 @@ def write_raw(path, raw):
     raw
         Secret data to write to <path>. Has to be a mapping.
     """
-    log.debug("Writing vault secrets for %s at %s", __grains__["id"], path)
+    log.debug("Writing vault secrets for %s at %s", __grains__.get("id"), path)
     try:
-        vault.write_kv(path, raw, __opts__, __context__)
-        return True
+        res = vault.write_kv(path, raw, __opts__, __context__)
+        if isinstance(res, dict):
+            return res["data"]
+        return res
     except Exception as err:  # pylint: disable=broad-except
         log.error("Failed to write secret! %s: %s", type(err).__name__, err)
         return False
@@ -693,11 +732,13 @@ def patch_secret(path, **kwargs):
     """
     # TODO: patch can be emulated as read, local update and write
     # -> catch VaultPermissionDeniedError and try that way
-    log.debug("Patching vault secrets for %s at %s", __grains__["id"], path)
+    log.debug("Patching vault secrets for %s at %s", __grains__.get("id"), path)
     data = {x: y for x, y in kwargs.items() if not x.startswith("__")}
     try:
-        vault.patch_kv(path, data, __opts__, __context__)
-        return True
+        res = vault.patch_kv(path, data, __opts__, __context__)
+        if isinstance(res, dict):
+            return res["data"]
+        return res
     except Exception as err:  # pylint: disable=broad-except
         log.error("Failed to patch secret! %s: %s", type(err).__name__, err)
         return False
@@ -740,10 +781,9 @@ def delete_secret(path, *args):
 
         For KV v2, you can specify versions to soft-delete as supplemental arguments.
     """
-    log.debug("Deleting vault secrets for %s in %s", __grains__["id"], path)
+    log.debug("Deleting vault secrets for %s in %s", __grains__.get("id"), path)
     try:
-        vault.delete_kv(path, __opts__, __context__, versions=list(args) or None)
-        return True
+        return vault.delete_kv(path, __opts__, __context__, versions=list(args) or None)
     except Exception as err:  # pylint: disable=broad-except
         log.error("Failed to delete secret! %s: %s", type(err).__name__, err)
         return False
@@ -753,7 +793,7 @@ def destroy_secret(path, *args):
     """
     .. versionadded:: 3001
 
-    Destroy specified secret version at the path in vault. The vault policy
+    Destroy specified secret versions at the path in vault. The vault policy
     used must allow this. Only supported on Vault KV version 2.
 
     CLI Example:
@@ -773,14 +813,16 @@ def destroy_secret(path, *args):
     path
         The path to the secret, including mount.
 
-    You can specify versions to destroy as supplemental arguments.
+    You can specify versions to destroy as supplemental arguments. At least one
+    is required.
     """
-    log.debug("Destroying vault secrets for %s in %s", __grains__["id"], path)
+    if not args:
+        raise SaltInvocationError("Need at least one version to destroy.")
+    log.debug("Destroying vault secrets for %s in %s", __grains__.get("id"), path)
     try:
-        vault.destroy_kv(path, list(args), __opts__, __context__)
-        return True
+        return vault.destroy_kv(path, list(args), __opts__, __context__)
     except Exception as err:  # pylint: disable=broad-except
-        log.error("Failed to delete secret! %s: %s", type(err).__name__, err)
+        log.error("Failed to destroy secret! %s: %s", type(err).__name__, err)
         return False
 
 
@@ -831,7 +873,7 @@ def list_secrets(path, default=None, keys_only=False):
     """
     if default is None:
         default = CommandExecutionError
-    log.debug("Listing vault secret keys for %s in %s", __grains__["id"], path)
+    log.debug("Listing vault secret keys for %s in %s", __grains__.get("id"), path)
     try:
         keys = vault.list_kv(path, __opts__, __context__)
         if keys_only:
@@ -861,12 +903,14 @@ def clear_token_cache(connection_only=True):
     connection_only
         .. versionadded:: pending_pr
 
-        Only delete cache data scoped to a connection configuration. This is currently
-        true for all Vault cache data, but might change in the future.
+        Only delete cache data scoped to a connection configuration.
+        This includes config and secret cache always and KV metadata
+        cache, depending on if ``vault:cache:kv_metadata`` is set to
+        ``connection``, which is the default value.
         Defaults to True.
     """
     log.debug("Deleting vault connection cache.")
-    vault.clear_cache(__opts__, connection_only=connection_only)
+    return vault.clear_cache(__opts__, __context__, connection=connection_only)
 
 
 def policy_fetch(policy):
@@ -893,7 +937,7 @@ def policy_fetch(policy):
     policy
         The name of the policy
     """
-
+    # there is also "sys/policies/acl/{policy}"
     endpoint = f"sys/policy/{policy}"
 
     try:
@@ -933,7 +977,7 @@ def policy_write(policy, rules):
         Rules formatted as in-line HCL
     """
     endpoint = f"sys/policy/{policy}"
-    payload = {"rules": rules}
+    payload = {"policy": rules}
     try:
         return vault.query("POST", endpoint, __opts__, __context__, payload=payload)
     except SaltException as err:
