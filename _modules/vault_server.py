@@ -85,6 +85,18 @@ def _parse_args(args, include_equal=True):
 
 
 def is_initialized(vault_addr="https://127.0.0.1:8200"):
+    """
+    Check whether Vault has been initialized.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+            salt '*' vault_server.is_initialized https://vault.example.com
+
+    vault_addr
+        The URL of the Vault server. Defaults to ``https://127.0.0.1:8200.``
+    """
     # exit code: 0=yes 1=error 2=no
     out = _vault("status", expect_error=True, vault_addr=vault_addr)
     return out["retcode"] == 0
@@ -98,6 +110,43 @@ def initialize(
     rekey=False,
     vault_addr="https://127.0.0.1:8200",
 ):
+    """
+    Initialize or rekey a Vault instance.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+            salt '*' vault_server.initialize 5 3
+
+    key_shares
+        Number of key shares to split the generated root key into.
+
+    key_threshold
+        Number of key shares required to reconstruct the root key.
+        This must be less than or equal to key_shares.
+
+    pgp_keys
+        List of PGP public keys to use to encrypt the key shards. The
+        number of entries must match key_shares.
+        Either a list of files on disk/armored public keys or
+        a list of Keybase usernames, each one formatted as ``keybase:<username>``.
+        When supplied, the generated unseal keys will be encrypted and
+        base64-encoded in the order specified in this list.
+
+    root_token_pgp_key
+        Path to a file on disk or an armored public key to use to encrypt the
+        initial root token with. Can also be a Keybase username, formatted as
+        ``keybase:<username>``. When supplied, the generated root token will be
+        encrypted and base64-encoded with the given public key.
+        Unavailable when rekeying.
+
+    rekey
+        Do not initialize, but rekey the Vault instance. Defaults to False.
+
+    vault_addr
+        The URL of the Vault server. Defaults to ``https://127.0.0.1:8200.``
+    """
     options = [
         ("key-shares", key_shares),
         ("key-threshold", key_threshold),

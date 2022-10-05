@@ -35,16 +35,17 @@ def initialized(
         This must be less than or equal to key_shares.
 
     pgp_keys
-        List of paths to files on disk containing public PGP keys OR
-        list of Keybase usernames using the format "keybase:<username>".
-        When supplied, the generated unseal keys will be encrypted and
-        base64-encoded in the order specified in this list. The
+        List of PGP public keys to use to encrypt the key shards. The
         number of entries must match key_shares.
+        Either a list of files on disk/armored public keys or
+        a list of Keybase usernames, each one formatted as ``keybase:<username>``.
+        When supplied, the generated unseal keys will be encrypted and
+        base64-encoded in the order specified in this list.
 
     root_token_pgp_key
-        Path to a file on disk containing a binary or base64-encoded public PGP
-        key. This can also be specified as a Keybase username using the format
-        "keybase:<username>". When supplied, the generated root token will be
+        Path to a file on disk or an armored public key to use to encrypt the
+        initial root token with. Can also be a Keybase username, formatted as
+        ``keybase:<username>``. When supplied, the generated root token will be
         encrypted and base64-encoded with the given public key.
 
     vault_addr
