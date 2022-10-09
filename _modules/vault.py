@@ -22,9 +22,14 @@ configuration, as well as configuration for the module.
 
 .. versionchanged:: pending_pr
 
-    The configuration structure has changed significantly to account for many
-    new features. If found, the old configuration structure will be translated
-    to the new one automatically.
+    The ``vault`` configuration structure has changed significantly to account
+    for many new features. If found, the old structure will be automatically
+    translated to the new one.
+
+    **Please update your peer_run configuration** to take full advantage of the
+    updated modules. The old endpoint (``vault.generate_token``) will continue
+    to work, but result in unnecessary roundtrips once your minions have been
+    updated.
 
 To allow minions to pull configuration and credentials from the Salt master,
 add this segment to the master configuration file:
@@ -33,9 +38,9 @@ add this segment to the master configuration file:
 
     peer_run:
         .*:
-            - vault.get_config
-            - vault.generate_new_token  # relevant when ``issue:type`` == ``token``
-            - vault.generate_secret_id  # relevant when ``issue:type`` == ``approle``
+            - vault.get_config          # always
+            - vault.generate_new_token  # relevant when `token` == `issue:type`
+            - vault.generate_secret_id  # relevant when `approle` == `issue:type`
 
 Minimally required configuration:
 
@@ -74,7 +79,7 @@ A sensible example configuration, e.g. in /etc/salt/master.d/vault.conf:
 
 The above configuration requires the following policies for the master:
 
-.. code-block:: terraform
+.. code-block:: vaultpolicy
 
     # Issue tokens
     path "auth/token/create" {
@@ -116,7 +121,7 @@ from a separate authentication endpoint (notice differing mounts):
 
 The above configuration requires the following policies for the master:
 
-.. code-block:: terraform
+.. code-block:: vaultpolicy
 
     # List existing AppRoles
     path "auth/salt-minions/role" {
@@ -164,7 +169,7 @@ The above configuration requires the following policies for the master:
 
 This enables you to write templated ACL policies like:
 
-.. code-block:: terraform
+.. code-block:: vaultpolicy
 
     path "salt/data/minions/{{identity.entity.metadata.minion-id}}" {
         capabilities = ["read"]
@@ -242,6 +247,11 @@ approle_name
 
     The name of the AppRole. Defaults to ``salt-master``.
 
+    .. note::
+
+        Only relevant when a locally configured role_id/secret_id uses
+        response wrapping.
+
 method
     Currently only ``token`` and ``approle`` auth types are supported.
     Defaults to ``token``.
@@ -254,9 +264,21 @@ method
 role_id
     The role ID of the AppRole. Required if auth:method == ``approle``.
 
+    .. versionchanged:: pending_pr
+
+        In addition to a plain string, this can also be specified as a
+        dictionary that includes ``wrap_info``, i.e. the return payload
+        of a wrapping request.
+
 secret_id
     The secret ID of the AppRole.
     Only required if the configured role ID requires it.
+
+    .. versionchanged:: pending_pr
+
+        In addition to a plain string, this can also be specified as a
+        dictionary that includes ``wrap_info``, i.e. the return payload
+        of a wrapping request.
 
 token
     Token to authenticate to Vault with. Required if auth:method == ``token``.
@@ -284,6 +306,12 @@ token
 
        export VAULT_TOKEN=11111111-1111-1111-1111-1111111111111
 
+    .. versionchanged:: pending_pr
+
+        In addition to a plain string, this can also be specified as a
+        dictionary that includes ``wrap_info``, i.e. the return payload
+        of a wrapping request.
+
 ``cache``
 ~~~~~~~~~
 Configures configuration cache on minions and secret cache on all hosts as well
@@ -306,13 +334,13 @@ config
     .. versionadded:: pending_pr
 
     The time in seconds to cache queried configuration from the master.
-    Defaults to 3600 (1h).
+    Defaults to ``3600`` (1h).
 
 kv_metadata
     .. versionadded:: pending_pr
 
     The time in seconds to cache KV metadata used to determine if a path
-    is using version 1/2 for. Defaults to "connection", which will clear
+    is using version 1/2 for. Defaults to ``connection``, which will clear
     the metadata cache once a new configuration is requested from the
     master. Setting this to ``None``/``null`` will keep the information
     indefinitely until the cache is cleared.
@@ -349,10 +377,9 @@ approle
 
     ``params`` configures the AppRole the master creates for minions. See the
     `Vault API docs <https://www.vaultproject.io/api-docs/auth/approle#create-update-approle>`_
-    for details. The configuration is only relevant for the first time the
-    AppRole is created. If you update these params, you will need to update
-    the minion AppRoles manually using the vault runner:
-    ``salt-run vault.sync_approles`` .
+    for details. If you update these params, you can update the minion AppRoles
+    manually using the vault runner: ``salt-run vault.sync_approles``, but they
+    will be updated automatically during a request by a minion as well.
 
 token
     .. versionadded:: pending_pr
@@ -394,7 +421,7 @@ allow_minion_override_params
         This used to be found in ``auth:allow_minion_override``.
 
     Whether to allow minions to request to override parameters for issuing credentials,
-    especially ``ttl`` and ``num_uses``. Defaults to false.
+    especially ``ttl`` and ``num_uses``. Defaults to False.
 
     .. note::
 
@@ -409,7 +436,7 @@ wrap
 
     The time a minion has to unwrap a wrapped secret issued by the master.
     Set this to false to disable wrapping, otherwise a time string like ``30s``
-    can be used. Defaults to 30s.
+    can be used. Defaults to ``30s``.
 
 ``keys``
 ~~~~~~~~
@@ -466,7 +493,7 @@ assign
 
     .. versionadded:: pending_pr
 
-        Policies can be templated with pillar values as well: ``salt_role_{pillar[roles]}``
+        Policies can be templated with pillar values as well: ``salt_role_{pillar[roles]}``.
         Make sure to only reference pillars that are not sourced from Vault since the latter
         ones might be unavailable during policy rendering.
 
@@ -542,15 +569,18 @@ url
     URL to your Vault installation. Required.
 
 verify
-    For details please see
-    https://requests.readthedocs.io/en/master/user/advanced/#ssl-cert-verification
+    Configures certificate verification behavior when issuing requests to the
+    Vault server. If unset, requests will use the system default CA bundle.
+
+    For details, please see `the requests documentation <https://requests.readthedocs.io/en/master/user/advanced/#ssl-cert-verification>`_.
 
     .. versionadded:: 2018.3.0
 
     .. versionchanged:: pending_pr
 
-        Setting this value to ``default`` will autodiscover the platform default
-        CA bundle using ``salt.utils.http.get_ca_bundle``.
+        Minions again respect the master configuration value, which was changed
+        implicitly in v3001. If this value is set in the minion configuration
+        as well, it will take precedence.
 
 namespace
     Optional Vault namespace. Used with Vault Enterprise.
@@ -570,7 +600,7 @@ from salt.exceptions import CommandExecutionError, SaltException, SaltInvocation
 log = logging.getLogger(__name__)
 
 
-def read_secret(path, key=None, metadata=False, default=None):
+def read_secret(path, key=None, metadata=False, default="__unset__"):
     """
     Return the value of key at path in vault, or entire secret.
 
@@ -587,9 +617,9 @@ def read_secret(path, key=None, metadata=False, default=None):
 
     Required policy:
 
-    .. code-block:: terraform
+    .. code-block:: vaultpolicy
 
-        path "<mount/<secret>" {
+        path "<mount>/<secret>" {
             capabilities = ["read"]
         }
 
@@ -617,7 +647,7 @@ def read_secret(path, key=None, metadata=False, default=None):
         When the path or path/key combination is not found, an exception will
         be raised, unless a default is provided here.
     """
-    if default is None:
+    if default == "__unset__":
         default = CommandExecutionError
     if key is not None:
         metadata = False
@@ -648,9 +678,9 @@ def write_secret(path, **kwargs):
 
     Required policy:
 
-    .. code-block:: terraform
+    .. code-block:: vaultpolicy
 
-        path "<mount/<secret>" {
+        path "<mount>/<secret>" {
             capabilities = ["create", "update"]
         }
 
@@ -721,7 +751,7 @@ def patch_secret(path, **kwargs):
 
     Required policy:
 
-    .. code-block:: terraform
+    .. code-block:: vaultpolicy
 
         path "<mount>/data/<secret>" {
             capabilities = ["patch"]
@@ -758,9 +788,9 @@ def delete_secret(path, *args):
 
     Required policy:
 
-    .. code-block:: terraform
+    .. code-block:: vaultpolicy
 
-        path "<mount/<secret>" {
+        path "<mount>/<secret>" {
             capabilities = ["delete"]
         }
 
@@ -804,7 +834,7 @@ def destroy_secret(path, *args):
 
     Required policy:
 
-    .. code-block:: terraform
+    .. code-block:: vaultpolicy
 
         path "<mount>/destroy/<secret>" {
             capabilities = ["update"]
@@ -826,7 +856,7 @@ def destroy_secret(path, *args):
         return False
 
 
-def list_secrets(path, default=None, keys_only=False):
+def list_secrets(path, default="__unset__", keys_only=False):
     """
     List secret keys at the path in vault. The vault policy used must allow this.
     The path should end with a trailing slash.
@@ -844,7 +874,7 @@ def list_secrets(path, default=None, keys_only=False):
 
     Required policy:
 
-    .. code-block:: terraform
+    .. code-block:: vaultpolicy
 
         path "<mount>/<path>" {
             capabilities = ["list"]
@@ -871,7 +901,7 @@ def list_secrets(path, default=None, keys_only=False):
         Setting this to True will only return the list of keys.
         For backwards-compatibility reasons, this defaults to False.
     """
-    if default is None:
+    if default == "__unset__":
         default = CommandExecutionError
     log.debug("Listing vault secret keys for %s in %s", __grains__.get("id"), path)
     try:
@@ -928,7 +958,7 @@ def policy_fetch(policy):
 
     Required policy:
 
-    .. code-block:: terraform
+    .. code-block:: vaultpolicy
 
         path "sys/policy/<policy>" {
             capabilities = ["read"]
@@ -964,7 +994,7 @@ def policy_write(policy, rules):
 
     Required policy:
 
-    .. code-block:: terraform
+    .. code-block:: vaultpolicy
 
         path "sys/policy/<policy>" {
             capabilities = ["create", "update"]
@@ -998,7 +1028,7 @@ def policy_delete(policy):
 
     Required policy:
 
-    .. code-block:: terraform
+    .. code-block:: vaultpolicy
 
         path "sys/policy/<policy>" {
             capabilities = ["delete"]
@@ -1031,7 +1061,7 @@ def policies_list():
 
     Required policy:
 
-    .. code-block:: terraform
+    .. code-block:: vaultpolicy
 
         path "sys/policy" {
             capabilities = ["read"]

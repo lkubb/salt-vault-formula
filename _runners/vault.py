@@ -27,7 +27,12 @@ log = logging.getLogger(__name__)
 
 
 def generate_token(
-    minion_id, signature, impersonated_by_master=False, ttl=None, uses=None
+    minion_id,
+    signature,
+    impersonated_by_master=False,
+    ttl=None,
+    uses=None,
+    upgrade_request=False,
 ):
     """
     .. deprecated:: pending_pr
@@ -50,7 +55,22 @@ def generate_token(
 
     uses
         Number of times a token can be used
+
+    upgrade_request
+        In case the new runner endpoints have not been whitelisted for peer running,
+        this endpoint serves as a gateway to ``vault.get_config``.
+        Defaults to False.
     """
+    if upgrade_request:
+        log.warning(
+            "Detected minion fallback to old vault.generate_token peer run function. "
+            "Please update your master peer_run configuration."
+        )
+        issue_params = {"ttl": ttl, "uses": uses}
+        return get_config(
+            minion_id, signature, impersonated_by_master, issue_params=issue_params
+        )
+
     log.debug(
         "Token generation request for %s (impersonated by master: %s)",
         minion_id,
@@ -131,7 +151,7 @@ def generate_new_token(
             return {"expire_cache": True, "error": "Master does not issue tokens."}
 
         ret = {
-            "server": _get_server_config(),
+            "server": _config("server"),
             "auth": {},
         }
 
@@ -149,13 +169,6 @@ def generate_new_token(
         return ret
     except Exception as err:  # pylint: disable=broad-except
         return {"error": "{}: {}".format(type(err).__name__, str(err))}
-
-
-def _get_server_config():
-    ret = copy.copy(_config("server"))
-    if "default" == __opts__.get("vault", {}).get("server", {}).get("verify"):
-        ret["verify"] = "default"
-    return ret
 
 
 def _generate_token(minion_id, issue_params, wrap):
@@ -220,7 +233,7 @@ def get_config(minion_id, signature, impersonated_by_master=False, issue_params=
                 "method": _config("issue:type"),
             },
             "cache": _config("cache"),
-            "server": _get_server_config(),
+            "server": _config("server"),
             "wrap_info_nested": [],
         }
         wrap = _config("issue:wrap")
@@ -286,7 +299,7 @@ def get_role_id(minion_id, signature, impersonated_by_master=False, issue_params
             return {"expire_cache": True, "error": "Master does not issue AppRoles."}
 
         ret = {
-            "server": _get_server_config(),
+            "server": _config("server"),
             "data": {},
         }
 
@@ -396,7 +409,7 @@ def generate_secret_id(
             }
 
         ret = {
-            "server": _get_server_config(),
+            "server": _config("server"),
             "data": {},
         }
 
@@ -490,11 +503,8 @@ def show_policies(minion_id, refresh_pillar="__unset__", expire=None):
         meta = _lookup_approle(minion_id)
         return meta["token_policies"]
 
-    refresh_pillar = (
-        refresh_pillar
-        if refresh_pillar != "__unset__"
-        else _config("policies:refresh_pillar")
-    )
+    if refresh_pillar == "__unset__":
+        refresh_pillar = _config("policies:refresh_pillar")
     expire = expire if expire is not None else _config("policies:cache_time")
     return _get_policies_cached(minion_id, refresh_pillar=refresh_pillar, expire=expire)
 
@@ -732,7 +742,7 @@ def clear_cache():
 def _config(key=None):
     ckey = "vault_master_config"
     if ckey not in __context__:
-        __context__[ckey] = vault.parse_config(__opts__.get("vault", {}), opts=__opts__)
+        __context__[ckey] = vault.parse_config(__opts__.get("vault", {}))
 
     if key is None:
         return __context__[ckey]
