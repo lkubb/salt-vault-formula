@@ -3,10 +3,8 @@ Custom execution module for managing a Hashicorp Vault server.
 This is intended to complement the official module.
 """
 
-from pathlib import Path
-
 import salt.utils.path
-from salt.exceptions import CommandExecutionError, SaltInvocationError
+from salt.exceptions import CommandExecutionError
 
 __virtualname__ = "vault_server"
 
@@ -179,9 +177,7 @@ def initialize(
             root_token_pgp_key = tmp
         options.append(("root-token-pgp-key", root_token_pgp_key))
 
-    out = _vault(
-        cmd, options=options, output_loglevel="quiet", vault_addr=vault_addr
-    )
+    out = _vault(cmd, options=options, output_loglevel="quiet", vault_addr=vault_addr)
 
     if pgp_keys_tmp:
         for tmp in pgp_keys_tmp:

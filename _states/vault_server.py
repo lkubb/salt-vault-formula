@@ -55,20 +55,20 @@ def initialized(
     ret = {"name": name, "result": True, "comment": "", "changes": {}}
 
     try:
-        if __salt__[f"vault_server.is_initialized"](vault_addr):
-            ret["comment"] = f"Vault server is already initialized."
+        if __salt__["vault_server.is_initialized"](vault_addr):
+            ret["comment"] = "Vault server is already initialized."
             return ret
 
         ret["changes"] = {"initialized": vault_addr}
 
         if __opts__["test"]:
             ret["result"] = None
-            ret["comment"] = f"Vault server would have been initialized."
+            ret["comment"] = "Vault server would have been initialized."
             return ret
 
-        ret["comment"] = f"Vault server has been initialized."
+        ret["comment"] = "Vault server has been initialized."
 
-        out = __salt__[f"vault_server.initialize"](
+        out = __salt__["vault_server.initialize"](
             key_shares=key_shares,
             key_threshold=key_threshold,
             pgp_keys=pgp_keys,
@@ -85,9 +85,7 @@ def initialized(
 
         for i, key in enumerate(out["unseal_keys_b64"]):
             write_secret(__salt__["file.join"](output, f"unseal_key_{i}"), key)
-        write_secret(
-            __salt__["file.join"](output, "root_token"), out["root_token"]
-        )
+        write_secret(__salt__["file.join"](output, "root_token"), out["root_token"])
 
     except (CommandExecutionError, SaltInvocationError) as e:
         ret["result"] = False

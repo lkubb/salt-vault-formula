@@ -16,7 +16,6 @@ import string
 import time
 
 import requests
-
 import salt.cache
 import salt.crypt
 import salt.exceptions
