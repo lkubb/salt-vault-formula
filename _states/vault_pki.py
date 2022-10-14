@@ -162,7 +162,7 @@ def intermediate_ca(
             return ret
 
         # This means a CSR has to be created
-        csr = __salt__["vault.get_intermediate_csr"](
+        csr = __salt__["vault_pki.get_intermediate_csr"](
             name,
             mount=mount,
             exclude_cn_from_sans=exclude_cn_from_sans,
