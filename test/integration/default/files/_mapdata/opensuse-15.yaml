@@ -22,6 +22,11 @@ values:
     pgp_keys: []
     root_token_pgp_key: null
     vault_addr: null
+  pki:
+    ca: []
+    roles_absent: []
+    roles_present: []
+    urls: []
   map_jinja:
     sources:
     - Y:G@osarch

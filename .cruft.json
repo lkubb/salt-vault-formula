@@ -36,6 +36,12 @@
           "pgp_keys": [],
           "root_token_pgp_key": null,
           "vault_addr": null
+        },
+        "pki": {
+          "ca": [],
+          "roles_present": [],
+          "roles_absent": [],
+          "urls": []
         }
       },
       "_template": "https://github.com/lkubb/salt-template-formula"

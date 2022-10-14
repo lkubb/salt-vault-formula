@@ -21,6 +21,11 @@ vault:
     pgp_keys: []
     root_token_pgp_key: null
     vault_addr: null
+  pki:
+    ca: []
+    roles_absent: []
+    roles_present: []
+    urls: []
 
   tofs:
     # The files_switch key serves as a selector for alternative
