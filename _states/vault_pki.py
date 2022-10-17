@@ -15,6 +15,7 @@ log = logging.getLogger(__name__)
 
 def intermediate_ca(
     name,
+    days_remaining=30,
     csr_path=None,
     certificate=None,
     salt_ca=None,
@@ -42,6 +43,10 @@ def intermediate_ca(
         If more than one ``name`` is desired, specify the alternative names in
         the ``alt_names`` list. Do not use this state to manage multiple issuers
         on a single mount.
+
+    days_remaining
+        Attempt to recreate the certificate if the number of days the certificate
+        will be valid for is less than the number specified. Defaults to 30.
 
     csr_path
         Export the Certificate Signing Request to this path. If unspecified,
@@ -134,9 +139,16 @@ def intermediate_ca(
 
         if default_issuer:
             # Generating a CSR only will not create an issuer
-            # TODO: verify validity etc
-            ret["comment"] = "Default issuer is already configured."
-            return ret
+            default_issuer_cert = __salt__["vault_pki.fetch_issuer_cert"](mount=mount)[
+                "certificate"
+            ]
+            if _valid_for(default_issuer_cert, days_remaining):
+                # TODO: verify parameters
+                ret["comment"] = (
+                    "Default issuer is already configured. "
+                    f"The certificate will still be valid in {days_remaining} days."
+                )
+                return ret
 
         # This should mean a signed certificate is available
         if csr_path is not None and certificate is not None:
@@ -149,7 +161,8 @@ def intermediate_ca(
             ret["result"] = False
             ret["comment"] = (
                 "A CSR has already been generated, but no "
-                "signed certificate to import was provided."
+                "signed certificate to import was provided. "
+                "Please remove the CSR file if you want to regenerate it."
             )
             return ret
 
@@ -550,10 +563,8 @@ def certificate_managed(
     try:
         current = None
         if __salt__["file.file_exists"](name):
-            current = __salt__["x509.read_certificate"](name)
-            valid_until = datetime.datetime.fromisoformat(current["not_after"])
-            valid_at = datetime.datetime.now() + datetime.timedelta(days=days_remaining)
-            if valid_at < valid_until:
+            current = True
+            if _valid_for(name, days_remaining):
                 ret["comment"] = (
                     "Certificate exists and will still be valid in "
                     f"{days_remaining} days."
@@ -644,3 +655,14 @@ def _get_file_args(name, **kwargs):
             extra_args[k] = v
     file_args["name"] = name
     return file_args, extra_args
+
+
+def _valid_for(cert, days):
+    """
+    x509.will_expire is supposed to work like this, but actually only works
+    for files, not PEM strings.
+    """
+    current = __salt__["x509.read_certificate"](cert)
+    valid_until = datetime.datetime.fromisoformat(current["Not After"])
+    valid_at = datetime.datetime.now() + datetime.timedelta(days=days)
+    return valid_at < valid_until
