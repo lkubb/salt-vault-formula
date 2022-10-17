@@ -498,7 +498,7 @@ def get_intermediate_csr(
         raise CommandExecutionError(f"{err.__class__}: {err}") from err
 
 
-def set_intermediate_cert(cert, mount="pki"):
+def set_intermediate_cert(cert, chain=None, mount="pki"):
     """
     Import a PEM-encoded CA certificate.
 
@@ -516,17 +516,20 @@ def set_intermediate_cert(cert, mount="pki"):
     mount
         The mount path the PKI backend is mounted to. Defaults to ``pki``.
     """
-    if "BEGIN CERTIFICATE" not in cert:
-        cert = __salt__["cp.get_file_str"](cert)
-    if not cert or "BEGIN CERTIFICATE" not in cert:
-        raise CommandExecutionError(
-            "Passed cert is invalid. Make sure it is "
-            "either the certificate string or a valid file path."
-        )
-    cert_normalized = __salt__["x509.get_pem_entry"](cert, pem_type="CERTIFICATE")
+    cert_chain = []
+    for c in [cert] + (chain or []):
+        if "BEGIN CERTIFICATE" not in c:
+            c = __salt__["cp.get_file_str"](c)
+        if not c or "BEGIN CERTIFICATE" not in c:
+            raise CommandExecutionError(
+                "Passed cert is invalid. Make sure it is "
+                "either the certificate string or a valid file path."
+            )
+        c = __salt__["x509.get_pem_entry"](c, pem_type="CERTIFICATE")
+        cert_chain.append(salt.utils.stringutils.to_str(c))
 
     endpoint = f"{mount}/intermediate/set-signed"
-    payload = {"certificate": salt.utils.stringutils.to_str(cert_normalized)}
+    payload = {"certificate": "\n".join(cert_chain)}
 
     log.debug("Importing intermediate CA certificate.")
     try:

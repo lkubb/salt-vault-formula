@@ -20,6 +20,7 @@ def intermediate_ca(
     certificate=None,
     salt_ca=None,
     salt_signing_policy=None,
+    ca_chain=None,
     mount="pki",
     exclude_cn_from_sans=False,
     alt_names=None,
@@ -68,6 +69,10 @@ def intermediate_ca(
         A valid signing policy that should be used to sign this CA certificate.
         All parameters for ``x509.create_certificate`` should be defined there.
         Required when using ``salt_ca``. See the ``x509`` module docs for details.
+
+    ca_chain
+        A list of certificates in correct order (root CA would be last) to import
+        as CA chain.
 
     mount
         The mount path the PKI backend is mounted to. Defaults to ``pki``.
@@ -123,13 +128,13 @@ def intermediate_ca(
         ] = "You need to specify either csr_path or salt_ca and salt_signing_policy."
         return ret
 
-    def _import_intermediate_cert(certificate, mount, ret):
+    def _import_intermediate_cert(certificate, chain, mount, ret):
         if __opts__["test"]:
             ret["result"] = None
             ret["comment"] = "Default issuer certificate would have been imported."
             ret["changes"]["imported"] = ["new_issuer"]
             return ret
-        imported = __salt__["vault_pki.set_intermediate_cert"](certificate, mount=mount)
+        imported = __salt__["vault_pki.set_intermediate_cert"](certificate, chain, mount=mount)
         ret["comment"] = "Default issuer certificate has been imported."
         ret["changes"]["imported"] = imported
         return ret
@@ -152,7 +157,7 @@ def intermediate_ca(
 
         # This should mean a signed certificate is available
         if csr_path is not None and certificate is not None:
-            return _import_intermediate_cert(certificate, mount, ret)
+            return _import_intermediate_cert(certificate, ca_chain, mount, ret)
 
         # If using manual signing and the CSR file exists, but we're here,
         # that means it hasn't been signed yet. Fail this state to avoid
@@ -204,7 +209,7 @@ def intermediate_ca(
         certificate = __salt__["x509.create_certificate"](
             text=True, ca_server=salt_ca, csr=csr, signing_policy=salt_signing_policy
         )
-        return _import_intermediate_cert(certificate, mount, ret)
+        return _import_intermediate_cert(certificate, ca_chain, mount, ret)
 
     except CommandExecutionError as err:
         ret["result"] = False
