@@ -4,7 +4,7 @@ Execution module to manage the Vault PKI secret engine.
 
 import logging
 
-import salt.utils.json
+import salt.utils.stringutils
 import vaultutil as vault
 from salt.exceptions import CommandExecutionError, SaltInvocationError
 
@@ -526,7 +526,7 @@ def set_intermediate_cert(cert, mount="pki"):
     cert_normalized = __salt__["x509.get_pem_entry"](cert, pem_type="CERTIFICATE")
 
     endpoint = f"{mount}/intermediate/set-signed"
-    payload = {"certificate": salt.utils.json.dumps(cert_normalized)}
+    payload = {"certificate": salt.utils.stringutils.to_str(cert_normalized)}
 
     log.debug("Importing intermediate CA certificate.")
     try:

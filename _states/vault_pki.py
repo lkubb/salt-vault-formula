@@ -136,6 +136,7 @@ def intermediate_ca(
             # Generating a CSR only will not create an issuer
             # TODO: verify validity etc
             ret["comment"] = "Default issuer is already configured."
+            return ret
 
         # This should mean a signed certificate is available
         if csr_path is not None and certificate is not None:
