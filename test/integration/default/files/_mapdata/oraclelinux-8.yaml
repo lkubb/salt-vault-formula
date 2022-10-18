@@ -27,6 +27,7 @@ values:
     roles_absent: []
     roles_present: []
     urls: []
+  version: null
   map_jinja:
     sources:
     - Y:G@osarch

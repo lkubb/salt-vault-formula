@@ -27,6 +27,7 @@ values:
     roles_absent: []
     roles_present: []
     urls: []
+  version: null
   # Just here for testing
   added_in_defaults: defaults_value
   winner: defaults

@@ -27,6 +27,7 @@
       "git_username": "lkubb",
       "_lookup": {},
       "_settings": {
+        "version": null,
         "config": {},
         "disable_swap": false,
         "init": {

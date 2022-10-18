@@ -26,6 +26,7 @@ vault:
     roles_absent: []
     roles_present: []
     urls: []
+  version: null
 
   tofs:
     # The files_switch key serves as a selector for alternative

@@ -9,8 +9,11 @@ include:
   - {{ slsdotpath }}.repo
 
 vault-package-install-pkg-installed:
-  pkg.installed:
+  pkg.{{ "installed" if vault.version != "latest" else "latest"}}:
     - name: {{ vault.lookup.pkg.name }}
+{%- if vault.version and "latest" != vault.version %}
+    - version: {{ vault.version }}
+{%- endif %}
 
 # This is necessary to use json-style configuration.
 # There is no inbuilt Salt serializer for hcl
