@@ -134,7 +134,9 @@ def intermediate_ca(
             ret["comment"] = "Default issuer certificate would have been imported."
             ret["changes"]["imported"] = ["new_issuer"]
             return ret
-        imported = __salt__["vault_pki.set_intermediate_cert"](certificate, chain, mount=mount)
+        imported = __salt__["vault_pki.set_intermediate_cert"](
+            certificate, chain, mount=mount
+        )
         ret["comment"] = "Default issuer certificate has been imported."
         ret["changes"]["imported"] = imported
         return ret

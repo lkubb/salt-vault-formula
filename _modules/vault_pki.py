@@ -301,7 +301,7 @@ def delete_role(name, mount="pki"):
 
     .. code-block:: bash
 
-            salt '*' vault_pki.fetch_role myrole
+            salt '*' vault_pki.delete_role myrole
 
     mount
         The mount path the PKI backend is mounted to. Defaults to ``pki``.
@@ -668,7 +668,7 @@ def get_certificate(
         Only honored when signing a CSR.
     """
     if issuer_ref is None:
-        prefix = "{mount}"
+        prefix = mount
     else:
         prefix = f"{mount}/issuer/{issuer_ref}"
 
