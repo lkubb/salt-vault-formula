@@ -1,10 +1,15 @@
 """
-State module to manage the Vault database secret engine.
+Manage the Vault database secret engine.
+
+Configuration instructions are documented in the :ref:`vault execution module docs <vault-setup>`.
+
+.. versionadded:: 3007.0
 """
 
 import logging
+import re
 
-from salt.exceptions import CommandExecutionError
+from salt.exceptions import CommandExecutionError, SaltInvocationError
 
 log = logging.getLogger(__name__)
 
@@ -18,11 +23,12 @@ def connection_present(
     root_rotation_statements=None,
     password_policy=None,
     rotate=True,
+    force=False,
     mount="database",
     **kwargs,
 ):
     """
-    Make sure a database connection is present as specified.
+    Ensure a database connection is present as specified.
 
     name
         The name of the database connection.
@@ -78,7 +84,7 @@ def connection_present(
         diff_params = (
             ("plugin_version", version),
             ("allowed_roles", allowed_roles),
-            ("root_rotation_statements", root_rotation_statements),
+            ("root_credentials_rotate_statements", root_rotation_statements),
             ("password_policy", password_policy),
         )
         changed = {}
@@ -88,12 +94,19 @@ def connection_present(
             if param not in current or current[param] != arg:
                 changed.update({param: {"old": current.get(param), "new": arg}})
         for param, val in kwargs.items():
-            if param not in current or current[param] != val:
+            if param == "password":
+                # password is not reported
+                continue
+            if (
+                param not in current["connection_details"]
+                or current["connection_details"][param] != val
+            ):
                 changed.update({param: {"old": current.get(param), "new": val}})
         return changed
 
     try:
         current = __salt__["vault_db.fetch_connection"](name, mount=mount)
+        changes = {}
 
         if current:
             if current["plugin_name"] != __salt__["vault_db.get_plugin_name"](plugin):
@@ -107,17 +120,17 @@ def connection_present(
                 ret["changes"]["deleted for plugin change"] = name
                 current = None
             else:
-                changed = _diff_params(current)
-                if not changed:
+                changes = _diff_params(current)
+                if not changes:
                     ret["comment"] = "Connection is present as specified"
                     return ret
-                ret["changes"]["changed"] = changed
 
         if __opts__["test"]:
             ret["result"] = None
             ret[
                 "comment"
             ] = f"Connection `{name}` would have been {'updated' if current else 'created'}"
+            ret["changes"].update(changes)
             if not current:
                 ret["changes"]["created"] = name
             return ret
@@ -140,14 +153,18 @@ def connection_present(
             raise CommandExecutionError(
                 "There were no errors during role management, but it is reported as absent."
             )
+        if not current:
+            ret["changes"]["created"] = name
 
-        if _diff_params(new):
+        new_diff = _diff_params(new)
+        if new_diff:
             ret["result"] = False
             ret["comment"] = (
-                "There were no errors during role management, but "
-                "the reported parameters do not match."
+                "There were no errors during connection management, but "
+                f"the reported parameters do not match: {new_diff}"
             )
             return ret
+        ret["changes"].update(changes)
 
     except CommandExecutionError as err:
         ret["result"] = False
@@ -159,7 +176,7 @@ def connection_present(
 
 def connection_absent(name, mount="database"):
     """
-    Make sure a database connection is absent.
+    Ensure a database connection is absent.
 
     name
         The name of the connection.
@@ -214,7 +231,7 @@ def role_present(
     mount="database",
 ):
     """
-    Make sure a regular database role is present as specified.
+    Ensure a regular database role is present as specified.
 
     name
         The name of the database role.
@@ -263,6 +280,15 @@ def role_present(
     """
     ret = {"name": name, "result": True, "comment": "", "changes": {}}
 
+    if not isinstance(creation_statements, list):
+        creation_statements = [creation_statements]
+    if revocation_statements and not isinstance(revocation_statements, list):
+        revocation_statements = [revocation_statements]
+    if rollback_statements and not isinstance(rollback_statements, list):
+        rollback_statements = [rollback_statements]
+    if renew_statements and not isinstance(renew_statements, list):
+        renew_statements = [renew_statements]
+
     def _diff_params(current):
         nonlocal connection, creation_statements, default_ttl, max_ttl, revocation_statements
         nonlocal rollback_statements, renew_statements, credential_type, credential_config
@@ -270,8 +296,8 @@ def role_present(
         diff_params = (
             ("db_name", connection),
             ("creation_statements", creation_statements),
-            ("default_ttl", default_ttl),
-            ("max_ttl", max_ttl),
+            ("default_ttl", _timestring_map(default_ttl)),
+            ("max_ttl", _timestring_map(max_ttl)),
             ("revocation_statements", revocation_statements),
             ("rollback_statements", rollback_statements),
             ("renew_statements", renew_statements),
@@ -294,7 +320,7 @@ def role_present(
             if not changed:
                 ret["comment"] = "Role is present as specified"
                 return ret
-            ret["changes"] = {"changed": changed}
+            ret["changes"].update(changed)
 
         if __opts__["test"]:
             ret["result"] = None
@@ -325,15 +351,19 @@ def role_present(
                 "There were no errors during role management, but it is reported as absent."
             )
 
-        if _diff_params(new):
+        if not current:
+            ret["changes"]["created"] = name
+
+        new_diff = _diff_params(new)
+        if new_diff:
             ret["result"] = False
             ret["comment"] = (
                 "There were no errors during role management, but "
-                "the reported parameters do not match."
+                f"the reported parameters do not match: {new_diff}"
             )
             return ret
 
-    except CommandExecutionError as err:
+    except (CommandExecutionError, SaltInvocationError) as err:
         ret["result"] = False
         ret["comment"] = str(err)
         ret["changes"] = {}
@@ -343,7 +373,7 @@ def role_present(
 
 def role_absent(name, static=False, mount="database"):
     """
-    Make sure a database role is absent.
+    Ensure a database role is absent.
 
     name
         The name of the role.
@@ -400,7 +430,7 @@ def static_role_present(
     mount="database",
 ):
     """
-    Make sure a database Static Role is present as specified.
+    Ensure a database Static Role is present as specified.
 
     name
         The name of the database role.
@@ -435,12 +465,15 @@ def static_role_present(
     """
     ret = {"name": name, "result": True, "comment": "", "changes": {}}
 
+    if rotation_statements and not isinstance(rotation_statements, list):
+        rotation_statements = [rotation_statements]
+
     def _diff_params(current):
         nonlocal connection, username, rotation_period, rotation_statements, credential_type, credential_config
         diff_params = (
             ("db_name", connection),
             ("username", username),
-            ("rotation_period", rotation_period),
+            ("rotation_period", _timestring_map(rotation_period)),
             ("rotation_statements", rotation_statements),
             ("credential_type", credential_type),
             ("credential_config", credential_config),
@@ -461,7 +494,7 @@ def static_role_present(
             if not changed:
                 ret["comment"] = "Role is present as specified"
                 return ret
-            ret["changes"] = {"changed": changed}
+            ret["changes"].update(changed)
 
         if __opts__["test"]:
             ret["result"] = None
@@ -489,17 +522,49 @@ def static_role_present(
                 "There were no errors during role management, but it is reported as absent."
             )
 
-        if _diff_params(new):
+        if not current:
+            ret["changes"]["created"] = name
+
+        new_diff = _diff_params(new)
+        if new_diff:
             ret["result"] = False
             ret["comment"] = (
                 "There were no errors during role management, but "
-                "the reported parameters do not match."
+                f"the reported parameters do not match: {new_diff}"
             )
             return ret
 
-    except CommandExecutionError as err:
+    except (CommandExecutionError, SaltInvocationError) as err:
         ret["result"] = False
         ret["comment"] = str(err)
         ret["changes"] = {}
 
     return ret
+
+
+def _timestring_map(val):
+    if val is None:
+        return val
+    if isinstance(val, (int, float)):
+        return val
+    try:
+        return float(val)
+    except ValueError:
+        pass
+    if not isinstance(val, str):
+        raise SaltInvocationError("Expected integer or time string")
+    if not re.match(r"^\d+(?:\.\d+)?[smhd]$", val):
+        raise SaltInvocationError(f"Invalid time string format: {val}")
+    raw, unit = float(val[:-1]), val[-1]
+    if unit == "s":
+        return raw
+    raw *= 60
+    if unit == "m":
+        return raw
+    raw *= 60
+    if unit == "h":
+        return raw
+    raw *= 24
+    if unit == "d":
+        return raw
+    raise RuntimeError("This path should not have been hit")

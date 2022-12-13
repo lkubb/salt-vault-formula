@@ -1,5 +1,9 @@
 """
-Execution module to manage the Vault DB secret engine.
+Manage the Vault database secret engine.
+
+Configuration instructions are documented in the :ref:`vault execution module docs <vault-setup>`.
+
+.. versionadded:: 3007.0
 """
 
 import logging
@@ -165,7 +169,7 @@ def fetch_connection(name, mount="database"):
     mount
         The mount path the database backend is mounted to. Defaults to ``database``.
     """
-    endpoint = f"{mount}/connection/{name}"
+    endpoint = f"{mount}/config/{name}"
     try:
         return vault.query("GET", endpoint, __opts__, __context__)["data"]
     except vault.VaultNotFoundError:
@@ -202,7 +206,7 @@ def write_connection(
         that action after configuring the plugin. This will change the password of the user
         configured in this step. The new password will not be viewable by users.
 
-    `API method docs <https://www.vaultproject.io/api-docs/secret/databases#delete-connection>`_.
+    `API method docs <https://www.vaultproject.io/api-docs/secret/databases#configure-connection>`_.
 
     CLI Example:
 
@@ -252,7 +256,7 @@ def write_connection(
         as supplemental keyword arguments. For known plugins, the required arguments will
         be checked.
     """
-    endpoint = f"{mount}/connection/{name}"
+    endpoint = f"{mount}/config/{name}"
     plugin_meta = PLUGINS.get(plugin, "default")
     plugin_name = plugin_meta["name"] or plugin
     payload = {k: v for k, v in kwargs.items() if not k.startswith("_")}
@@ -302,7 +306,7 @@ def delete_connection(name, mount="database"):
     mount
         The mount path the database backend is mounted to. Defaults to ``database``.
     """
-    endpoint = f"{mount}/connection/{name}"
+    endpoint = f"{mount}/config/{name}"
     try:
         return vault.query("DELETE", endpoint, __opts__, __context__)
     except vault.VaultException as err:
