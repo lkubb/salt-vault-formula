@@ -682,7 +682,7 @@ def get_certificate(
         raise SaltInvocationError("Only specify either private_key or csr.")
 
     if private_key is not None:
-        csr = __salt__["x509.create_csr"](text=True, private_key=private_key)
+        csr = __salt__["x509.create_csr"](private_key=private_key)
 
     if csr is not None:
         if "BEGIN CERTIFICATE REQUEST" not in csr:

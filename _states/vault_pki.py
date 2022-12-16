@@ -670,6 +670,6 @@ def _valid_for(cert, days):
     for files, not PEM strings.
     """
     current = __salt__["x509.read_certificate"](cert)
-    valid_until = datetime.datetime.fromisoformat(current["Not After"])
+    valid_until = datetime.datetime.fromisoformat(current["not_after"])
     valid_at = datetime.datetime.now() + datetime.timedelta(days=days)
     return valid_at < valid_until
