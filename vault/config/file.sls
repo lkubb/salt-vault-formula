@@ -17,7 +17,6 @@ vault-config-file-file-managed:
     - user: root
     - group: {{ vault.lookup.rootgroup }}
     - makedirs: True
-    - template: jinja
     - require:
       - sls: {{ sls_package_install }}
     - dataset: {{ vault.config | json }}
