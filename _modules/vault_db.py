@@ -260,12 +260,13 @@ def write_connection(
     plugin_meta = PLUGINS.get(plugin, "default")
     plugin_name = plugin_meta["name"] or plugin
     payload = {k: v for k, v in kwargs.items() if not k.startswith("_")}
-    missing_kwargs = set(plugin_meta["required"]) - set(payload)
 
-    if missing_kwargs:
-        raise SaltInvocationError(
-            f"The plugin {plugin} requires the following additional kwargs: {missing_kwargs}."
-        )
+    if fetch_connection(name, mount=mount) is None:
+        missing_kwargs = set(plugin_meta["required"]) - set(payload)
+        if missing_kwargs:
+            raise SaltInvocationError(
+                f"The plugin {plugin} requires the following additional kwargs: {missing_kwargs}."
+            )
 
     payload["plugin_name"] = f"{plugin_name}-database-plugin"
     payload["verify_connection"] = verify

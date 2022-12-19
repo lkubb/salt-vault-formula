@@ -135,6 +135,9 @@ def connection_present(
                 ret["changes"]["created"] = name
             return ret
 
+        if current and "password" in kwargs:
+            kwargs.pop("password")
+
         __salt__["vault_db.write_connection"](
             name,
             plugin,
