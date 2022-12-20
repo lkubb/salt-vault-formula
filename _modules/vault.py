@@ -17,10 +17,10 @@ Functions to interact with Hashicorp Vault.
 Configuration
 -------------
 
-The salt-master must be configured to allow peer-runner
-configuration, as well as configuration for the module.
+In addition to the module configuration, it is required for the Salt master
+to be configured to allow peer runs in order to use the Vault integration.
 
-.. versionchanged:: pending_pr
+.. versionchanged:: 3007.0
 
     The ``vault`` configuration structure has changed significantly to account
     for many new features. If found, the old structure will be automatically
@@ -75,7 +75,6 @@ A sensible example configuration, e.g. in /etc/salt/master.d/vault.conf:
           - salt_role_{pillar[roles]}
       server:
         url: https://vault.example.com:8200
-        verify: /etc/ssl/cert.pem
 
 The above configuration requires the following policies for the master:
 
@@ -114,7 +113,6 @@ from a separate authentication endpoint (notice differing mounts):
           role: '{pillar[role]}'
       server:
         url: https://vault.example.com:8200
-        verify: /etc/ssl/cert.pem
     ext_pillar:
       - vault: path=salt/minions/{minion}
       - vault: path=salt/roles/{pillar[role]}
@@ -238,12 +236,12 @@ All possible master configuration options with defaults:
 Contains authentication information for the local machine.
 
 approle_mount
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     The name of the AppRole authentication mount point. Defaults to ``approle``.
 
 approle_name
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     The name of the AppRole. Defaults to ``salt-master``.
 
@@ -256,15 +254,15 @@ method
     Currently only ``token`` and ``approle`` auth types are supported.
     Defaults to ``token``.
 
-    Approle is the preferred way to authenticate with Vault as it provide
-    some advanced options to control authentication process.
-    Please visit Vault documentation for more info:
-    https://www.vaultproject.io/docs/auth/approle.html
+    Approle is the preferred way to authenticate with Vault as it provides
+    some advanced options to control the authentication process.
+    Please see the `Vault documentation <https://www.vaultproject.io/docs/auth/approle.html>`_
+    for more information.
 
 role_id
-    The role ID of the AppRole. Required if auth:method == ``approle``.
+    The role ID of the AppRole. Required if ``auth:method`` == ``approle``.
 
-    .. versionchanged:: pending_pr
+    .. versionchanged:: 3007.0
 
         In addition to a plain string, this can also be specified as a
         dictionary that includes ``wrap_info``, i.e. the return payload
@@ -272,16 +270,16 @@ role_id
 
 secret_id
     The secret ID of the AppRole.
-    Only required if the configured role ID requires it.
+    Only required if the configured AppRole requires it.
 
-    .. versionchanged:: pending_pr
+    .. versionchanged:: 3007.0
 
         In addition to a plain string, this can also be specified as a
         dictionary that includes ``wrap_info``, i.e. the return payload
         of a wrapping request.
 
 token
-    Token to authenticate to Vault with. Required if auth:method == ``token``.
+    Token to authenticate to Vault with. Required if ``auth:method`` == ``token``.
 
     The token must be able to create tokens with the policies that should be
     assigned to minions.
@@ -306,7 +304,7 @@ token
 
        export VAULT_TOKEN=11111111-1111-1111-1111-1111111111111
 
-    .. versionchanged:: pending_pr
+    .. versionchanged:: 3007.0
 
         In addition to a plain string, this can also be specified as a
         dictionary that includes ``wrap_info``, i.e. the return payload
@@ -318,7 +316,7 @@ Configures configuration cache on minions and secret cache on all hosts as well
 as metadata cache for KV secrets.
 
 backend
-    .. versionchanged:: pending_pr
+    .. versionchanged:: 3007.0
 
         This used to be found in ``auth:token_backend``.
 
@@ -331,22 +329,22 @@ backend
     as well.
 
 config
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     The time in seconds to cache queried configuration from the master.
-    Defaults to ``3600`` (1h).
+    Defaults to ``3600`` (one hour).
 
 kv_metadata
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     The time in seconds to cache KV metadata used to determine if a path
     is using version 1/2 for. Defaults to ``connection``, which will clear
     the metadata cache once a new configuration is requested from the
     master. Setting this to ``None``/``null`` will keep the information
-    indefinitely until the cache is cleared.
+    indefinitely until the cache is cleared manually.
 
 secret
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     The time in seconds to cache tokens/secret-ids for. Defaults to ``ttl``,
     which caches the secret for as long as it is valid, unless a new configuration
@@ -357,7 +355,7 @@ secret
 Configures authentication data issued by the master to minions.
 
 type
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     The type of authentication to issue to minions. Can be ``token`` or ``approle``.
     Defaults to ``token``.
@@ -367,7 +365,7 @@ type
     It is strongly encouraged to create a separate mount dedicated to minions.
 
 approle
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     Configuration regarding issued AppRoles.
 
@@ -382,13 +380,13 @@ approle
     will be updated automatically during a request by a minion as well.
 
 token
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     Configuration regarding issued tokens.
 
     ``role_name`` specifies the role name for minion tokens created. Optional.
 
-    .. versionchanged:: pending_pr
+    .. versionchanged:: 3007.0
 
         This used to be found in ``role_name``.
 
@@ -403,7 +401,7 @@ token
 
     ``params`` configures the tokens the master issues to minions.
 
-    .. versionchanged:: pending_pr
+    .. versionchanged:: 3007.0
 
         This used to be found in ``auth:ttl`` and ``auth:uses``.
 
@@ -416,7 +414,7 @@ token
 
 
 allow_minion_override_params
-    .. versionchanged:: pending_pr
+    .. versionchanged:: 3007.0
 
         This used to be found in ``auth:allow_minion_override``.
 
@@ -425,14 +423,14 @@ allow_minion_override_params
 
     .. note::
 
-        Minion override parameters should be specified in the minion configuration
+        Minion override parameters can be specified in the minion configuration
         under ``vault:issue_params``. ``ttl`` and ``uses`` always refer to
         issued token lifecycle settings. For AppRoles specifically, there
         are more parameters, such as ``secret_id_num_uses`` and ``secret_id_ttl``.
         ``bind_secret_id`` can not be overridden.
 
 wrap
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     The time a minion has to unwrap a wrapped secret issued by the master.
     Set this to false to disable wrapping, otherwise a time string like ``30s``
@@ -444,10 +442,10 @@ wrap
 
 ``metadata``
 ~~~~~~~~~~~~
-.. versionadded:: pending_pr
+.. versionadded:: 3007.0
 
-Configures metadata for the issued entities/secrets. Values have to be strings and can
-be templated with the following variables:
+Configures metadata for the issued entities/secrets. Values have to be strings
+and can be templated with the following variables:
 
 - ``{jid}`` Salt job ID that issued the secret.
 - ``{minion}`` The minion ID the secret was issued for.
@@ -471,7 +469,7 @@ secret
 
 ``policies``
 ~~~~~~~~~~~~
-.. versionchanged:: pending_pr
+.. versionchanged:: 3007.0
 
     This used to specify the list of policies associated with a minion token only.
     The equivalent is found in ``assign``.
@@ -491,11 +489,13 @@ assign
 
     Defaults to ``[saltstack/minions, saltstack/{minion}]``.
 
-    .. versionadded:: pending_pr
+    .. versionadded:: 3006.0
 
         Policies can be templated with pillar values as well: ``salt_role_{pillar[roles]}``.
         Make sure to only reference pillars that are not sourced from Vault since the latter
-        ones might be unavailable during policy rendering.
+        ones might be unavailable during policy rendering. If you use the Vault
+        integration in one of your pillar ``sls`` files, all values from that file
+        will be absent during policy rendering, even the ones that do not depend on Vault.
 
     .. important::
 
@@ -511,7 +511,7 @@ assign
         types which work well.
 
 cache_time
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     Number of seconds compiled templated policies are cached on the master.
     This is important when using pillar values in templates, since compiling
@@ -530,7 +530,7 @@ cache_time
         (if allow_minion_override_params is True).
 
 refresh_pillar
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     Whether to refresh the minion pillar when compiling templated policies
     that contain pillar variables.
@@ -553,20 +553,20 @@ refresh_pillar
         If you use pillar values for templating policies and do not disable
         refreshing pillar data, make sure the relevant values are not sourced
         from Vault (ext_pillar, sdb) or from a pillar sls file that uses the vault
-        execution module. Although this will often work when cached pillar data is
+        execution/sdb module. Although this will often work when cached pillar data is
         available, if the master needs to compile the pillar data during policy rendering,
         all Vault modules will be broken to prevent an infinite loop.
 
 ``server``
 ~~~~~~~~~~
-.. versionchanged:: pending_pr
+.. versionchanged:: 3007.0
 
     The values found in here were found in the ``vault`` root namespace previously.
 
 Configures Vault server details.
 
 url
-    URL to your Vault installation. Required.
+    URL of your Vault installation. Required.
 
 verify
     Configures certificate verification behavior when issuing requests to the
@@ -576,7 +576,7 @@ verify
 
     .. versionadded:: 2018.3.0
 
-    .. versionchanged:: pending_pr
+    .. versionchanged:: 3007.0
 
         Minions again respect the master configuration value, which was changed
         implicitly in v3001. If this value is set in the minion configuration
@@ -590,6 +590,28 @@ namespace
 
     .. versionadded:: 3004
 
+
+Minion configuration (optional):
+
+config_location
+    Where to get the connection details for calling vault. By default,
+    vault will try to determine if it needs to request the connection
+    details from the master or from the local config. This optional option
+    will force vault to use the connection details from the master or the
+    local config. Can only be either ``master`` or ``local``.
+
+  .. versionadded:: 3006.0
+
+issue_params
+    Request overrides for token/AppRole issuance. This needs to be allowed
+    on the master by setting ``issue:allow_minion_override_params`` to true.
+    See the master configuration ``issue:token:params`` or ``issue:approle:params``
+    for reference.
+
+    .. versionchanged:: 3007.0
+
+        For token issuance, this used to be found in ``auth:ttl`` and ``auth:uses``.
+
 .. _vault-setup:
 """
 import logging
@@ -602,7 +624,7 @@ log = logging.getLogger(__name__)
 
 def read_secret(path, key=None, metadata=False, default="__unset__"):
     """
-    Return the value of key at path in vault, or entire secret.
+    Return the value of <key> at <path> in vault, or entire secret.
 
     .. versionchanged:: 3001
         The ``default`` argument has been added. When the path or path/key
@@ -706,7 +728,7 @@ def write_secret(path, **kwargs):
 
 def write_raw(path, raw):
     """
-    Set raw data at the path in vault. The vault policy used must allow this.
+    Set raw data at <path>. The vault policy used must allow this.
 
     CLI Example:
 
@@ -776,7 +798,7 @@ def patch_secret(path, **kwargs):
 
 def delete_secret(path, *args):
     """
-    Delete secret at the path in vault. The vault policy used must allow this.
+    Delete secret at <path>. The vault policy used must allow this.
     If <path> is on KV v2, the secret will be soft-deleted.
 
     CLI Example:
@@ -784,7 +806,7 @@ def delete_secret(path, *args):
     .. code-block:: bash
 
         salt '*' vault.delete_secret "secret/my/secret"
-        salt '*' vault.delete_secret "secret/my/secret" 0 1 2 3
+        salt '*' vault.delete_secret "secret/my/secret" 1 2 3
 
     Required policy:
 
@@ -807,9 +829,10 @@ def delete_secret(path, *args):
     path
         The path to the secret, including mount.
 
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
-        For KV v2, you can specify versions to soft-delete as supplemental arguments.
+        For KV v2, you can specify versions to soft-delete as supplemental
+        positional arguments.
     """
     log.debug("Deleting vault secrets for %s in %s", __grains__.get("id"), path)
     try:
@@ -823,7 +846,7 @@ def destroy_secret(path, *args):
     """
     .. versionadded:: 3001
 
-    Destroy specified secret versions at the path in vault. The vault policy
+    Destroy specified secret versions <path>. The vault policy
     used must allow this. Only supported on Vault KV version 2.
 
     CLI Example:
@@ -843,8 +866,8 @@ def destroy_secret(path, *args):
     path
         The path to the secret, including mount.
 
-    You can specify versions to destroy as supplemental arguments. At least one
-    is required.
+    You can specify versions to destroy as supplemental positional arguments.
+    At least one is required.
     """
     if not args:
         raise SaltInvocationError("Need at least one version to destroy.")
@@ -858,7 +881,7 @@ def destroy_secret(path, *args):
 
 def list_secrets(path, default="__unset__", keys_only=False):
     """
-    List secret keys at the path in vault. The vault policy used must allow this.
+    List secret keys at <path>. The vault policy used must allow this.
     The path should end with a trailing slash.
 
     .. versionchanged:: 3001
@@ -895,7 +918,7 @@ def list_secrets(path, default="__unset__", keys_only=False):
         is provided here.
 
     keys_only
-        .. versionadded:: pending_pr
+        .. versionadded:: 3007.0
 
         This function used to return a dictionary like ``{"keys": ["some/", "some/key"]}``.
         Setting this to True will only return the list of keys.
@@ -931,7 +954,7 @@ def clear_token_cache(connection_only=True):
         salt '*' vault.clear_token_cache
 
     connection_only
-        .. versionadded:: pending_pr
+        .. versionadded:: 3007.0
 
         Only delete cache data scoped to a connection configuration.
         This includes config and secret cache always and KV metadata
@@ -945,7 +968,7 @@ def clear_token_cache(connection_only=True):
 
 def policy_fetch(policy):
     """
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     Fetch the rules associated with an ACL policy. Returns None if the policy
     does not exist.
@@ -965,7 +988,7 @@ def policy_fetch(policy):
         }
 
     policy
-        The name of the policy
+        The name of the policy to fetch.
     """
     # there is also "sys/policies/acl/{policy}"
     endpoint = f"sys/policy/{policy}"
@@ -982,7 +1005,7 @@ def policy_fetch(policy):
 
 def policy_write(policy, rules):
     r"""
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     Create or update an ACL policy.
 
@@ -990,7 +1013,7 @@ def policy_write(policy, rules):
 
     .. code-block:: bash
 
-        salt '*' vault.policy_write salt_minion "path \"secret/foo\" {..."
+        salt '*' vault.policy_write salt_minion 'path "secret/foo" {...}'
 
     Required policy:
 
@@ -1001,10 +1024,10 @@ def policy_write(policy, rules):
         }
 
     policy
-        The name of the policy
+        The name of the policy to create/update.
 
     rules
-        Rules formatted as in-line HCL
+        Rules to write, formatted as in-line HCL.
     """
     endpoint = f"sys/policy/{policy}"
     payload = {"policy": rules}
@@ -1016,7 +1039,7 @@ def policy_write(policy, rules):
 
 def policy_delete(policy):
     """
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     Delete an ACL policy. Returns False if the policy did not exist.
 
@@ -1035,7 +1058,7 @@ def policy_delete(policy):
         }
 
     policy
-        The name of the policy
+        The name of the policy to delete.
     """
     endpoint = f"sys/policy/{policy}"
 
@@ -1049,7 +1072,7 @@ def policy_delete(policy):
 
 def policies_list():
     """
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     List all ACL policies.
 
@@ -1075,7 +1098,7 @@ def policies_list():
 
 def query(method, endpoint, payload=None):
     """
-    .. versionadded:: pending_pr
+    .. versionadded:: 3007.0
 
     Issue arbitrary queries against the Vault API.
 
@@ -1094,7 +1117,7 @@ def query(method, endpoint, payload=None):
         vault read -output-policy auth/token/lookup-self
 
     method
-        HTTP method to use
+        HTTP method to use.
 
     endpoint
         Vault API endpoint to issue the request against. Do not include ``/v1/``.

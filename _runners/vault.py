@@ -35,12 +35,12 @@ def generate_token(
     upgrade_request=False,
 ):
     """
-    .. deprecated:: pending_pr
+    .. deprecated:: 3006
 
-    Generate a Vault token for minion minion_id
+    Generate a Vault token for minion <minion_id>.
 
     minion_id
-        The id of the minion that requests a token
+        The ID of the minion that requests a token.
 
     signature
         Cryptographic signature which validates that the request is indeed sent
@@ -120,12 +120,12 @@ def generate_new_token(
     minion_id, signature, impersonated_by_master=False, issue_params=None
 ):
     """
-    .. versionadded:: pending_pr
+    .. versionadded:: 3006
 
-    Generate a Vault token for minion minion_id.
+    Generate a Vault token for minion <minion_id>.
 
     minion_id
-        The id of the minion that requests a token
+        The ID of the minion that requests a token.
 
     signature
         Cryptographic signature which validates that the request is indeed sent
@@ -137,8 +137,9 @@ def generate_new_token(
 
     issue_params
         Dictionary of parameters for the generated tokens.
-        See master configuration vault:issue:token:params for possible values.
-        Requires "allow_minion_override_params" master configuration setting to be effective.
+        See master configuration ``vault:issue:token:params`` for possible values.
+        Requires ``vault:issue:allow_minion_override_params`` master configuration
+        setting to be effective.
     """
     log.debug(
         "Token generation request for %s (impersonated by master: %s)",
@@ -202,12 +203,12 @@ def _generate_token(minion_id, issue_params, wrap):
 
 def get_config(minion_id, signature, impersonated_by_master=False, issue_params=None):
     """
-    .. versionadded:: pending_pr
+    .. versionadded:: 3006
 
     Return Vault configuration for minion <minion_id>.
 
     minion_id
-        The id of the minion that requests the configuration.
+        The ID of the minion that requests the configuration.
 
     signature
         Cryptographic signature which validates that the request is indeed sent
@@ -218,8 +219,9 @@ def get_config(minion_id, signature, impersonated_by_master=False, issue_params=
         True. This happens when the master generates minion pillars.
 
     issue_params
-        Parameters for credential issuance. Needs allow_minion_override_params in master
-        config set in order to apply.
+        Parameters for credential issuance.
+        Requires ``vault:issue:allow_minion_override_params`` master configuration
+        setting to be effective.
     """
     log.debug(
         "Config request for %s (impersonated by master: %s)",
@@ -266,13 +268,13 @@ def get_config(minion_id, signature, impersonated_by_master=False, issue_params=
 
 def get_role_id(minion_id, signature, impersonated_by_master=False, issue_params=None):
     """
-    .. versionadded:: pending_pr
+    .. versionadded:: 3006
 
     Return the Vault role-id for minion <minion_id>. Requires the master to be configured
     to generate AppRoles for minions (configuration: ``vault:issue:type``).
 
     minion_id
-        The id of the minion that requests a token
+        The ID of the minion that requests a role-id.
 
     signature
         Cryptographic signature which validates that the request is indeed sent
@@ -285,7 +287,8 @@ def get_role_id(minion_id, signature, impersonated_by_master=False, issue_params
     issue_params
         Dictionary of configuration values for the generated AppRole.
         See master configuration vault:issue:approle:params for possible values.
-        Requires "allow_minion_override_params" master configuration setting to be effective.
+        Requires ``vault:issue:allow_minion_override_params`` master configuration
+        setting to be effective.
     """
     log.debug(
         "role-id request for %s (impersonated by master: %s)",
@@ -323,6 +326,9 @@ def _get_role_id(minion_id, issue_params, wrap):
         # token_policies are set on the AppRole
         log.debug("Managing AppRole for %s.", minion_id)
         _manage_approle(minion_id, issue_params)
+        # Make sure cached data is refreshed. Clearing the cache would suffice
+        # here, but this branch should not be hit too often, so opt for simplicity.
+        _lookup_approle_cached(minion_id, refresh=True)
 
     role_id = _lookup_role_id(minion_id, wrap=wrap)
     if role_id is False:
@@ -360,13 +366,13 @@ def generate_secret_id(
     minion_id, signature, impersonated_by_master=False, issue_params=None
 ):
     """
-    .. versionadded:: pending_pr
+    .. versionadded:: 3006
 
     Generate a Vault secret-id for minion <minion_id>. Requires the master to be configured
     to generate AppRoles for minions (configuration: ``vault:issue:type``).
 
     minion_id
-        The id of the minion that requests a token
+        The ID of the minion that requests a secret-id.
 
     signature
         Cryptographic signature which validates that the request is indeed sent
@@ -379,7 +385,8 @@ def generate_secret_id(
     issue_params
         Dictionary of configuration values for the generated AppRole.
         See master configuration vault:issue:approle:params for possible values.
-        Requires "allow_minion_override_params" master configuration setting to be effective.
+        Requires ``vault:issue:allow_minion_override_params`` master configuration
+        setting to be effective.
     """
     log.debug(
         "secret-id generation request for %s (impersonated by master: %s)",
@@ -473,19 +480,19 @@ def show_policies(minion_id, refresh_pillar="__unset__", expire=None):
     Show the Vault policies that are applied to tokens for the given minion.
 
     minion_id
-        The minion's id.
+        The ID of the minion to show policies for.
 
     refresh_pillar
         Whether to refresh the pillar data when rendering templated policies.
         None will only refresh when the cached data is unavailable, boolean values
         force one behavior always.
-        Defaults to config value ``policies_refresh_pillar`` or None.
+        Defaults to config value ``vault:policies:refresh_pillar`` or None.
 
     expire
         Policy computation can be heavy in case pillar data is used in templated policies and
         it has not been cached. Therefore, a short-lived cache specifically for rendered policies
         is used. This specifies the expiration timeout in seconds.
-        Defaults to config value ``policies_cache_time`` or 60.
+        Defaults to config value ``vault:policies:cache_time`` or 60.
 
     .. note::
 
@@ -519,6 +526,10 @@ def sync_approles(minions=None, up=False, down=False):
         for one by the minion.
         Running this will reset minion overrides, which are reapplied automatically
         during the next request for authentication details.
+
+    .. note::
+        Unlike when issuing tokens, AppRole-associated policies are not regularly
+        refreshed automatically. It is advised to schedule regular runs of this function.
 
     If no parameter is specified, will try to sync AppRoles for all known minions.
 
@@ -585,7 +596,7 @@ def sync_entities(minions=None, up=False, down=False):
 
     .. note::
         This updates associated metadata only. Entities are created only
-        when issuing AppRoles to minions (``issue:type`` == ``approle``).
+        when issuing AppRoles to minions (``vault:issue:type`` == ``approle``).
 
     If no parameter is specified, will try to sync entities for all known minions.
 
@@ -696,10 +707,10 @@ def cleanup_auth():
     .. warning::
         Make absolutely sure that the configured minion approle issue mount is
         exclusively dedicated to the Salt master, otherwise you might lose data
-        by using this function! (config: ``issue:approle:mount``)
+        by using this function! (config: ``vault:issue:approle:mount``)
 
         This detects unknown existing AppRoles by listing all roles on the
-        configured minion approle mount and deducting known minions from the
+        configured minion AppRole mount and deducting known minions from the
         returned list.
 
     CLI Example:
@@ -781,7 +792,7 @@ def _get_policies(
     minion_id, refresh_pillar=None, **kwargs
 ):  # pylint: disable=unused-argument
     """
-    Get the policies that should be applied to a token for minion_id
+    Get the policies that should be applied to a token for <minion_id>
     """
     grains, pillar = _get_minion_data(minion_id, refresh_pillar)
     mappings = {"minion": minion_id, "grains": grains, "pillar": pillar}

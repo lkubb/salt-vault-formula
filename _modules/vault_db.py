@@ -654,7 +654,7 @@ def delete_role(name, static=False, mount="database"):
         raise CommandExecutionError(f"{err.__class__}: {err}") from err
 
 
-def get_creds(name, static=False, mount="database"):
+def get_creds(name, static=False, cache=True, valid_for=0, mount="database"):
     """
     Read credentials based on the named role.
 
@@ -673,14 +673,51 @@ def get_creds(name, static=False, mount="database"):
     static
         Whether this role is static. Defaults to False.
 
+    cache
+        Whether to use cached credentials local to this minion to avoid
+        unnecessary reissuance.
+        When ``static`` is false, set this to a string to be able to use multiple
+        distinct credentials using the same role on the same minion.
+        Set this to false to disable caching.
+        Defaults to true.
+
+        .. note::
+
+            This uses the same cache backend as the Vault integration, so make
+            sure you configure a persistent backend like ``disk`` if you expect
+            the credentials to survive a single run.
+
+
+    valid_for
+        When using cache, ensure the credentials are valid for at least this
+        amount of time, otherwise request new ones.
+        This can be an integer, which will be interpreted as seconds, or a time string
+        using the same format as Vault does:
+        Suffix ``s`` for seconds, ``m`` for minuts, ``h`` for hours, ``d`` for days.
+
     mount
         The mount path the database backend is mounted to. Defaults to ``database``.
     """
     endpoint = f"{mount}/{'static-' if static else ''}creds/{name}"
+
+    if cache:
+        cbank = f"vault_db/{mount}/{'static' if static else 'dynamic'}"
+        ckey = f"{name}_{cache}" if not static and isinstance(cache, str) else name
+        creds_cache = vault.get_lease_cache(
+            __opts__, __context__, cbank=cbank, ckey=ckey
+        )
+        cached_creds = creds_cache.get(valid_for)
+        if cached_creds:
+            return cached_creds.data
+
     try:
-        return vault.query("GET", endpoint, __opts__, __context__)
+        res = vault.query("GET", endpoint, __opts__, __context__)
     except vault.VaultException as err:
         raise CommandExecutionError(f"{err.__class__}: {err}") from err
+
+    if cache:
+        creds_cache.store(res)
+    return res["data"]
 
 
 def rotate_static_role(name, mount="database"):

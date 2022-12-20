@@ -7,8 +7,8 @@ Configuration instructions are documented in the :ref:`vault execution module do
 """
 
 import logging
-import re
 
+import vaultutil as vault
 from salt.exceptions import CommandExecutionError, SaltInvocationError
 
 log = logging.getLogger(__name__)
@@ -299,8 +299,8 @@ def role_present(
         diff_params = (
             ("db_name", connection),
             ("creation_statements", creation_statements),
-            ("default_ttl", _timestring_map(default_ttl)),
-            ("max_ttl", _timestring_map(max_ttl)),
+            ("default_ttl", vault.timestring_map(default_ttl)),
+            ("max_ttl", vault.timestring_map(max_ttl)),
             ("revocation_statements", revocation_statements),
             ("rollback_statements", rollback_statements),
             ("renew_statements", renew_statements),
@@ -476,7 +476,7 @@ def static_role_present(
         diff_params = (
             ("db_name", connection),
             ("username", username),
-            ("rotation_period", _timestring_map(rotation_period)),
+            ("rotation_period", vault.timestring_map(rotation_period)),
             ("rotation_statements", rotation_statements),
             ("credential_type", credential_type),
             ("credential_config", credential_config),
@@ -543,31 +543,3 @@ def static_role_present(
         ret["changes"] = {}
 
     return ret
-
-
-def _timestring_map(val):
-    if val is None:
-        return val
-    if isinstance(val, (int, float)):
-        return val
-    try:
-        return float(val)
-    except ValueError:
-        pass
-    if not isinstance(val, str):
-        raise SaltInvocationError("Expected integer or time string")
-    if not re.match(r"^\d+(?:\.\d+)?[smhd]$", val):
-        raise SaltInvocationError(f"Invalid time string format: {val}")
-    raw, unit = float(val[:-1]), val[-1]
-    if unit == "s":
-        return raw
-    raw *= 60
-    if unit == "m":
-        return raw
-    raw *= 60
-    if unit == "h":
-        return raw
-    raw *= 24
-    if unit == "d":
-        return raw
-    raise RuntimeError("This path should not have been hit")
