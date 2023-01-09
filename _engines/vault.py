@@ -26,8 +26,8 @@ import logging
 import re
 import time
 
-import salt.utils.vault as vault
-
+import vaultutil as vault
+from salt.exceptions import CommandExecutionError
 log = logging.getLogger(__name__)
 
 
@@ -50,23 +50,38 @@ class VaultEngine:
         self.interval = interval
         if not isinstance(leases, list):
             leases = [leases]
-        self.lease_patterns = tuple(re.compile(ptrn) for ptrn in leases)
+        self.all = ".*" in leases or "*" in leases
+        self.lease_patterns = tuple(re.compile(ptrn) for ptrn in leases) if not self.all else []
+        self.min_lease_validity = min_lease_validity
 
     def run(self):
+        fail_ctr = 0
         while self.running:
             # Ensure the current token is renewed, if possible.
             # This is done inside the vault util module and only
             # requires a request for an authenticated client.
             # Since requesting the lease store does that
             try:
-                lease_store = vault.get_lease_store(__opts__, __context__)
+                try:
+                    lease_store = vault.get_lease_store(__opts__, __context__)
+                    fail_ctr = 0
+                except CommandExecutionError as err:
+                    if "No access to master" in str(err):
+                        log.warning("master_uri is not in opts, indicating no connection to master. Attempting reload")
+                        return
+                    raise
             except Exception as err:  # pylint: disable=broad-except
-                log.error(err)
-                time.sleep(self.interval)
+                log.error(f"Received error: {err}")
+                fail_ctr += 1
+                interval = self.interval
+                if fail_ctr <= 5:
+                    interval = interval/5
+                log.info(f"Last {fail_ctr} attempts failed. Reattempting renewal in {interval} seconds")
+                time.sleep(interval)
                 continue
 
             all_leases = lease_store.list()
-            if ".*" in self.leases or "*" in self.leases:
+            if self.all is True:
                 leases = all_leases
             else:
                 leases = []
@@ -86,6 +101,6 @@ class VaultEngine:
                     continue
 
                 if ret is None:
-                    log.warning(f"Monitored lease {lease} will run out")
+                    log.warning(f"Monitored lease {lease} will run out (or does not exist)")
 
             time.sleep(self.interval)
