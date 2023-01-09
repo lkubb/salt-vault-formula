@@ -701,12 +701,13 @@ def get_creds(name, static=False, cache=True, valid_for=0, mount="database"):
     endpoint = f"{mount}/{'static-' if static else ''}creds/{name}"
 
     if cache:
-        cbank = f"vault_db/{mount}/{'static' if static else 'dynamic'}"
-        ckey = f"{name}_{cache}" if not static and isinstance(cache, str) else name
-        creds_cache = vault.get_lease_cache(
-            __opts__, __context__, cbank=cbank, ckey=ckey
-        )
-        cached_creds = creds_cache.get(valid_for)
+        ckey = f"db.{mount}.{'static' if static else 'dynamic'}.{name}"
+        if not static and isinstance(cache, str):
+            ckey += f".{cache}"
+        else:
+            ckey += ".default"
+        creds_cache = vault.get_lease_store(__opts__, __context__)
+        cached_creds = creds_cache.get(ckey, valid_for=valid_for)
         if cached_creds:
             return cached_creds.data
 
@@ -715,9 +716,10 @@ def get_creds(name, static=False, cache=True, valid_for=0, mount="database"):
     except vault.VaultException as err:
         raise CommandExecutionError(f"{err.__class__}: {err}") from err
 
+    lease = vault.VaultLease(**res)
     if cache:
-        creds_cache.store(res)
-    return res["data"]
+        creds_cache.store(ckey, lease)
+    return lease.data
 
 
 def rotate_static_role(name, mount="database"):

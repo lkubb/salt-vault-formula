@@ -24,7 +24,14 @@ import salt.utils.data
 import salt.utils.dictupdate
 import salt.utils.json
 import salt.utils.versions
+
 from salt.exceptions import SaltInvocationError
+
+try:
+    from salt.defaults import NOT_SET
+except ImportError:
+    NOT_SET = "__unset__"
+
 
 log = logging.getLogger(__name__)
 logging.getLogger("requests").setLevel(logging.WARNING)
@@ -32,6 +39,8 @@ logging.getLogger("requests").setLevel(logging.WARNING)
 
 # Make __salt__ available globally to avoid loading minion_mods multiple times
 __salt__ = {}
+
+TOKEN_CKEY = "__token"
 
 
 def query(
@@ -155,7 +164,7 @@ def query_raw(
     if not retry:
         return res
 
-    if 403 == res.status_code:
+    if res.status_code == 403:
         # in case cached authentication data was revoked
         clear_cache(opts, context)
         vault = get_authd_client(opts, context)
@@ -278,20 +287,44 @@ def _get_kv(opts, context):
         connection = False
     cbank = _get_cache_bank(opts, connection=connection)
     ckey = "secret_path_metadata"
-    metadata_cache = VaultCache(config, opts, context, cbank, ckey, ttl=ttl)
+    metadata_cache = VaultCache(
+        context, cbank, ckey, cache_backend=_get_cache_backend(config, opts), ttl=ttl
+    )
     return VaultKV(client, metadata_cache)
 
 
-def clear_cache(opts, context, ckey=None, connection=True):
+def get_lease_store(opts, context):
+    """
+    Return an instance of LeaseStore, which can be used
+    to cache leases and handle operations like renewals and revocations.
+    """
+    client, config = get_authd_client(opts, context, get_config=True)
+    session_cbank = _get_cache_bank(opts, session=True)
+    lease_cache = VaultLeaseCache(
+        context,
+        session_cbank + "/leases",
+        cache_backend=_get_cache_backend(config, opts),
+    )
+    return LeaseStore(client, lease_cache)
+
+
+def clear_cache(opts, context, ckey=None, connection=True, session=False):
     """
     Clears connection cache.
     """
-    cbank = _get_cache_bank(opts, connection=connection)
+    cbank = _get_cache_bank(
+        opts, connection=connection, session=session and not connection
+    )
     if cbank in context:
         if ckey is None:
             context.pop(cbank)
-        elif ckey in context[cbank]:
-            context[cbank].pop(ckey)
+        else:
+            context[cbank].pop(ckey, None)
+    # also remove sub-banks from context to mimic cache behavior
+    if ckey is None:
+        for bank in list(context):
+            if bank.startswith(cbank):
+                context.pop(bank)
     cache = salt.cache.factory(opts)
     if cache.contains(cbank, ckey):
         return cache.flush(cbank, ckey)
@@ -302,7 +335,7 @@ def clear_cache(opts, context, ckey=None, connection=True):
 
 
 def _get_cache_backend(config, opts):
-    if "session" == config["cache"]["backend"]:
+    if config["cache"]["backend"] == "session":
         return None
     if config["cache"]["backend"] in ["localfs", "disk", "file"]:
         # cache.Cache does not allow setting the type of cache by param
@@ -312,17 +345,6 @@ def _get_cache_backend(config, opts):
     # this should usually resolve to localfs as well on minions,
     # but can be overridden by setting cache in the minion config
     return salt.cache.factory(opts)
-
-
-def get_lease_cache(opts, context, cbank, ckey):
-    """
-    Return an instance of VaultLeaseCache, which can be used
-    to handle caching-related functions of leases like
-    authentication credentials.
-    """
-    auth_cbank = _get_cache_bank(opts)
-    config, _ = _get_connection_config(auth_cbank, opts, context)
-    return VaultLeaseCache(config, opts, context, cbank, ckey)
 
 
 def expand_pattern_lists(pattern, **mappings):
@@ -408,14 +430,17 @@ def timestring_map(val):
 
 SALT_RUNTYPE_MASTER = 0
 SALT_RUNTYPE_MASTER_IMPERSONATING = 1
-SALT_RUNTYPE_MINION_LOCAL = 2
-SALT_RUNTYPE_MINION_REMOTE = 3
+SALT_RUNTYPE_MASTER_PEER_RUN = 2
+SALT_RUNTYPE_MINION_LOCAL = 3
+SALT_RUNTYPE_MINION_REMOTE = 4
 
 
 def _get_salt_run_type(opts):
     if "vault" in opts and opts.get("__role", "minion") == "master":
-        if "grains" in opts and "id" in opts["grains"]:
+        if opts.get("minion_id"):
             return SALT_RUNTYPE_MASTER_IMPERSONATING
+        if "grains" in opts and "id" in opts["grains"]:
+            return SALT_RUNTYPE_MASTER_PEER_RUN
         return SALT_RUNTYPE_MASTER
 
     config_location = opts.get("vault", {}).get("config_location")
@@ -424,30 +449,32 @@ def _get_salt_run_type(opts):
             "Invalid vault configuration: config_location must be either local or master"
         )
 
-    if "master" == config_location:
+    if config_location == "master":
         pass
     elif any(
         (
             opts.get("local", None),
             opts.get("file_client", None) == "local",
             opts.get("master_type", None) == "disable",
-            "local" == config_location,
+            config_location == "local",
         )
     ):
         return SALT_RUNTYPE_MINION_LOCAL
     return SALT_RUNTYPE_MINION_REMOTE
 
 
-def _get_cache_bank(opts, force_local=False, connection=True):
+def _get_cache_bank(opts, force_local=False, connection=True, session=False):
     minion_id = None
     # force_local is necessary because pillar compilation would otherwise
     # leak tokens between master and minions
-    if (
-        not force_local
-        and _get_salt_run_type(opts) == SALT_RUNTYPE_MASTER_IMPERSONATING
-    ):
+    if not force_local and _get_salt_run_type(opts) in [
+        SALT_RUNTYPE_MASTER_IMPERSONATING,
+        SALT_RUNTYPE_MASTER_PEER_RUN,
+    ]:
         minion_id = opts["grains"]["id"]
     prefix = "vault" if minion_id is None else f"minions/{minion_id}/vault"
+    if session:
+        return prefix + "/connection/session"
     if connection:
         return prefix + "/connection"
     return prefix
@@ -462,15 +489,39 @@ def get_authd_client(opts, context, force_local=False, get_config=False):
         client, config = _build_authd_client(opts, context, force_local=force_local)
     except (VaultAuthExpired, VaultConfigExpired, VaultPermissionDeniedError):
         retry = True
+    # First, check if the token needs to be and can be renewed.
+    # Since this needs to check the possibly active session and does not care
+    # about valid secret IDs etc, we need to inspect the actual token.
+    if (
+        not retry
+        and config["auth"]["token_lifecycle"]["renew_increment"] is not False
+        and client.auth.get_token().is_renewable()
+        and not client.auth.get_token().is_valid(
+            config["auth"]["token_lifecycle"]["minimum_ttl"]
+        )
+    ):
+        log.debug("Renewing token")
+        client.token_renew(
+            increment=config["auth"]["token_lifecycle"]["renew_increment"]
+        )
 
-    # do not check the vault server for token validity because that consumes a use
-    if retry or not client.token_valid(remote=False):
+    if retry or not client.token_valid(
+        config["auth"]["token_lifecycle"]["minimum_ttl"] or 0, remote=False
+    ):
+        log.debug("Deleting cache and requesting new authentication credentials")
         clear_cache(opts, context)
         client, config = _build_authd_client(opts, context, force_local=force_local)
-        if not client.token_valid(remote=False):
-            raise VaultException(
-                "Could not build valid client. This is most likely a bug."
-            )
+        if not client.token_valid(
+            config["auth"]["token_lifecycle"]["minimum_ttl"] or 0, remote=False
+        ):
+            if config["auth"]["token_lifecycle"]["minimum_ttl"]:
+                log.warning(
+                    "Configuration error: auth:token_lifecycle:minimum_ttl cannot be honored because fresh tokens are issued with less ttl. Continuing anyways."
+                )
+            else:
+                raise VaultException(
+                    "Could not build valid client. This is most likely a bug."
+                )
 
     if get_config:
         return client, config
@@ -478,11 +529,23 @@ def get_authd_client(opts, context, force_local=False, get_config=False):
 
 
 def _build_authd_client(opts, context, force_local=False):
-    cbank = _get_cache_bank(opts, force_local=force_local)
+    connection_cbank = _get_cache_bank(opts, force_local=force_local)
     config, embedded_token = _get_connection_config(
-        cbank, opts, context, force_local=force_local
+        connection_cbank, opts, context, force_local=force_local
     )
-    token_cache = VaultAuthCache(config, opts, context, cbank, "token", VaultToken)
+    # Tokens are cached in a distinct scope to enable cache per session
+    session_cbank = _get_cache_bank(opts, force_local=force_local, session=True)
+    cache_ttl = (
+        config["cache"]["secret"] if config["cache"]["secret"] != "ttl" else None
+    )
+    token_cache = VaultAuthCache(
+        context,
+        session_cbank,
+        TOKEN_CKEY,
+        VaultToken,
+        cache_backend=_get_cache_backend(config, opts),
+        ttl=cache_ttl,
+    )
 
     client = None
 
@@ -492,16 +555,21 @@ def _build_authd_client(opts, context, force_local=False):
         secret_id_cache = None
         if secret_id:
             secret_id_cache = VaultAuthCache(
-                config, opts, context, cbank, "secret_id", VaultAppRoleSecretId
+                context,
+                connection_cbank,
+                "secret_id",
+                VaultSecretId,
+                cache_backend=_get_cache_backend(config, opts),
+                ttl=cache_ttl,
             )
             secret_id = secret_id_cache.get()
-            # only fetch secret-id if there is no cached valid token
+            # Only fetch secret ID if there is no cached valid token
             if cached_token is None and secret_id is None:
                 secret_id = _fetch_secret_id(
                     config, opts, secret_id_cache, force_local=force_local
                 )
             if secret_id is None:
-                secret_id = InvalidVaultAppRoleSecretId()
+                secret_id = InvalidVaultSecretId()
         role_id = config["auth"]["role_id"]
         # this happens with wrapped response merging
         if isinstance(role_id, dict):
@@ -572,8 +640,8 @@ def _get_connection_config(cbank, opts, context, force_local=False):
         config = _query_master(
             "generate_token",
             opts,
-            ttl=issue_params.get("ttl"),
-            uses=issue_params.get("uses"),
+            ttl=issue_params.get("explicit_max_ttl"),
+            uses=issue_params.get("num_uses"),
             upgrade_request=True,
         )
     config = parse_config(config, opts=opts)
@@ -605,7 +673,7 @@ def _fetch_secret_id(config, opts, secret_id_cache, force_local=False):
         if secret_id is not None:
             return secret_id
 
-        log.debug("Fetching new Vault AppRole secret-id.")
+        log.debug("Fetching new Vault AppRole secret ID.")
         secret_id = _query_master(
             "generate_secret_id",
             opts,
@@ -618,9 +686,9 @@ def _fetch_secret_id(config, opts, secret_id_cache, force_local=False):
             ]
             or None,
         )
-        secret_id = VaultAppRoleSecretId(**secret_id["data"])
-        # do not cache single-use secret-ids
-        if secret_id.secret_id_num_uses != 1:
+        secret_id = VaultSecretId(**secret_id["data"])
+        # Do not cache single-use secret IDs
+        if secret_id.num_uses != 1:
             secret_id_cache.store(secret_id)
         return secret_id
 
@@ -639,15 +707,15 @@ def _fetch_secret_id(config, opts, secret_id_cache, force_local=False):
                     ),
                 )
                 secret_id = secret_id["data"]
-            return LocalVaultAppRoleSecretId(**secret_id)
+            return LocalVaultSecretId(**secret_id)
         if secret_id:
             # assume locally configured secret_ids do not expire
-            return LocalVaultAppRoleSecretId(
-                config["auth"]["secret_id"],
+            return LocalVaultSecretId(
+                secret_id=config["auth"]["secret_id"],
                 secret_id_ttl=config["cache"]["config"],
-                secret_id_num_uses=None,
+                secret_id_num_uses=0,
             )
-        # when secret_id is falsey, the approle does not require secret ids,
+        # When secret_id is falsey, the approle does not require secret IDs,
         # hence a call to this function is superfluous
         raise salt.exceptions.SaltException("This code path should not be hit at all.")
 
@@ -720,7 +788,9 @@ def _fetch_token(config, opts, token_cache, force_local=False, embedded_token=No
                     )
                 token_meta = token_info.json()["data"]
                 token = VaultToken(
-                    embedded_token, lease_duration=token_meta["ttl"], **token_meta
+                    lease_id=embedded_token,
+                    lease_duration=token_meta["ttl"],
+                    **token_meta,
                 )
                 token_cache.store(token)
         if token is not None:
@@ -746,7 +816,6 @@ def _query_master(
         unwrap_expected_creation_path=None,
     ):
         if not result:
-            nonlocal func
             log.error(
                 "Failed to get Vault connection from master! No result returned - "
                 "does the peer runner publish configuration include `vault.%s`?",
@@ -779,9 +848,8 @@ def _query_master(
             config_expired = True
 
         if "server" in result:
-            # make sure locally overridden verify parameter does not
-            # always invalidate cache
-            nonlocal opts
+            # Ensure locally overridden verify parameter does not
+            # always invalidate cache.
             reported_server = parse_config(result["server"], validate=False, opts=opts)[
                 "server"
             ]
@@ -795,7 +863,7 @@ def _query_master(
             config_expired = True
             unwrap_expected_creation_path = None
 
-        # this is used to augment some vault responses with data fetched by the master
+        # This is used to augment some vault responses with data fetched by the master
         # e.g. secret_id_num_uses
         misc_data = result.get("misc_data", {})
 
@@ -804,7 +872,7 @@ def _query_master(
                 "server"
             ):
                 unwrap_client = None
-                # make sure to fetch wrapped data anyways for security reasons
+                # Ensure to fetch wrapped data anyways for security reasons
                 config_expired = True
 
             if unwrap_client is None:
@@ -841,8 +909,8 @@ def _query_master(
         for key, val in misc_data.items():
             tgt = "data" if result.get("data") is not None else "auth"
             if (
-                salt.utils.data.traverse_dict_and_list(result, f"{tgt}:{key}", "__unset__")
-                == "__unset__"
+                salt.utils.data.traverse_dict_and_list(result, f"{tgt}:{key}", NOT_SET)
+                == NOT_SET
             ):
                 salt.utils.dictupdate.set_dict_key_value(
                     result,
@@ -916,6 +984,10 @@ def parse_config(config, validate=True, opts=None):
             "approle_name": "salt-master",
             "method": "token",
             "secret_id": None,
+            "token_lifecycle": {
+                "minimum_ttl": 10,
+                "renew_increment": None,
+            },
         },
         "cache": {
             "backend": "session",
@@ -932,15 +1004,15 @@ def parse_config(config, validate=True, opts=None):
                     "bind_secret_id": True,
                     "secret_id_num_uses": 1,
                     "secret_id_ttl": 60,
-                    "ttl": 60,
-                    "uses": 10,
+                    "token_explicit_max_ttl": 60,
+                    "token_num_uses": 10,
                 },
             },
             "token": {
                 "role_name": None,
                 "params": {
-                    "ttl": None,
-                    "uses": 1,
+                    "explicit_max_ttl": None,
+                    "num_uses": 1,
                 },
             },
             "wrap": "30s",
@@ -972,7 +1044,7 @@ def parse_config(config, validate=True, opts=None):
     try:
         # Policy generation has params, the new config groups them together.
         if isinstance(config.get("policies", {}), list):
-            config["policies"] = {"assign": config["policies"]}
+            config["policies"] = {"assign": config.pop("policies")}
         merged = salt.utils.dictupdate.merge(
             default_config,
             config,
@@ -981,31 +1053,39 @@ def parse_config(config, validate=True, opts=None):
         )
         # ttl, uses were used as configuration for issuance and minion overrides as well
         # as token meta information. The new configuration splits those semantics.
-        for old_token_conf in ["ttl", "uses"]:
+        for old_token_conf, new_token_conf in [
+            ("ttl", "explicit_max_ttl"),
+            ("uses", "num_uses"),
+        ]:
             if old_token_conf in merged["auth"]:
-                merged["issue"]["token"]["params"][old_token_conf] = merged[
+                merged["issue"]["token"]["params"][new_token_conf] = merged[
                     "issue_params"
-                ][old_token_conf] = merged["auth"][old_token_conf]
+                ][new_token_conf] = merged["auth"].pop(old_token_conf)
         # Those were found in the root namespace, but grouping them together
         # makes semantic and practical sense.
         for old_server_conf in ["namespace", "url", "verify"]:
             if old_server_conf in merged:
-                merged["server"][old_server_conf] = merged[old_server_conf]
+                merged["server"][old_server_conf] = merged.pop(old_server_conf)
         if "role_name" in merged:
-            merged["issue"]["token"]["role_name"] = merged["role_name"]
+            merged["issue"]["token"]["role_name"] = merged.pop("role_name")
         if "token_backend" in merged["auth"]:
-            merged["cache"]["backend"] = merged["auth"]["token_backend"]
+            merged["cache"]["backend"] = merged["auth"].pop("token_backend")
         if "allow_minion_override" in merged["auth"]:
-            merged["issue"]["allow_minion_override_params"] = merged["auth"][
+            merged["issue"]["allow_minion_override_params"] = merged["auth"].pop(
                 "allow_minion_override"
-            ]
+            )
         if opts is not None and "vault" in opts:
             local_config = opts["vault"]
-            # make sure to respect locally configured verify parameter
-            if local_config.get("verify", "__unset__") != "__unset__":
+            # Respect locally configured verify parameter
+            if local_config.get("verify", NOT_SET) != NOT_SET:
                 merged["server"]["verify"] = local_config["verify"]
-            elif local_config.get("server", {}).get("verify", "__unset__") != "__unset__":
+            elif local_config.get("server", {}).get("verify", NOT_SET) != NOT_SET:
                 merged["server"]["verify"] = local_config["server"]["verify"]
+            # same for token_lifecycle
+            if local_config.get("auth", {}).get("token_lifecycle"):
+                merged["auth"]["token_lifecycle"] = local_config["auth"][
+                    "token_lifecycle"
+                ]
 
         if not validate:
             return merged
@@ -1031,10 +1111,10 @@ def parse_config(config, validate=True, opts=None):
 
 
 def _get_expected_creation_path(secret_type, config=None):
-    if "token" == secret_type:
+    if secret_type == "token":
         return r"auth/token/create(/[^/]+)?"
 
-    if "secret_id" == secret_type:
+    if secret_type == "secret_id":
         if config is not None:
             return r"auth/{}/role/{}/secret\-id".format(
                 re.escape(config["auth"]["approle_mount"]),
@@ -1042,7 +1122,7 @@ def _get_expected_creation_path(secret_type, config=None):
             )
         return r"auth/[^/]+/role/[^/]+/secret\-id"
 
-    if "role_id" == secret_type:
+    if secret_type == "role_id":
         if config is not None:
             return r"auth/{}/role/{}/role\-id".format(
                 re.escape(config["auth"]["approle_mount"]),
@@ -1244,8 +1324,10 @@ class VaultClient:
         """
         url = self._get_url(endpoint)
         headers = self._get_headers(wrap)
-        if isinstance(add_headers, dict):
+        try:
             headers.update(add_headers)
+        except TypeError:
+            pass
         res = requests.request(
             method, url, headers=headers, json=payload, verify=self.verify, **kwargs
         )
@@ -1346,7 +1428,7 @@ class VaultClient:
         self._raise_status(res)
         return res.json()["data"]
 
-    def token_valid(self, remote=True):  # pylint: disable=unused-argument
+    def token_valid(self, valid_for=0, remote=True):  # pylint: disable=unused-argument
         return False
 
     def get_config(self):
@@ -1407,11 +1489,13 @@ class AuthenticatedVaultClient(VaultClient):
     This should be used for most operations.
     """
 
+    auth = None
+
     def __init__(self, auth, url, **kwargs):
         self.auth = auth
         super().__init__(url, **kwargs)
 
-    def token_valid(self, remote=True):
+    def token_valid(self, valid_for=0, remote=True):
         """
         Check whether this client's authentication information is
         still valid.
@@ -1420,7 +1504,7 @@ class AuthenticatedVaultClient(VaultClient):
             Check with the remote Vault server as well. This consumes
             a token use. Defaults to true.
         """
-        if not self.auth.is_valid():
+        if not self.auth.is_valid(valid_for):
             return False
         if not remote:
             return True
@@ -1470,8 +1554,9 @@ class AuthenticatedVaultClient(VaultClient):
         Renew a token.
 
         increment
-            The time the token should be requested to be renewed for, starting
-            from the current point in time. The server might not honor this increment.
+            Request the token to be valid for this amount of time from the current
+            point of time onwards. Can also be used to reduce the validity period.
+            The server might not honor this increment.
             Can be an integer (seconds) or a time string like ``1h``. Optional.
 
         token
@@ -1514,6 +1599,9 @@ class AuthenticatedVaultClient(VaultClient):
         is_unauthd=False,
         **kwargs,
     ):  # pylint: disable=arguments-differ
+        """
+        Issue an authenticated request against the Vault API. Returns the raw response object.
+        """
         ret = super().request_raw(
             method,
             endpoint,
@@ -1533,59 +1621,163 @@ class AuthenticatedVaultClient(VaultClient):
         return headers
 
 
-class VaultLease:
+def iso_to_timestamp(iso_time):
     """
-    Base class for Vault leases that expire with time.
+    Most endpoints respond with RFC3339-formatted strings
+    This is a hacky way to use inbuilt tools only for converting
+    to a timestamp
+    """
+    # drop subsecond precision to make it easier on us
+    # (length would need to be 3, 6 or 9)
+    iso_time = re.sub(r"\.[\d]+", "", iso_time)
+    iso_time = re.sub(r"Z$", "+00:00", iso_time)
+    try:
+        # Python >=v3.7
+        return int(datetime.datetime.fromisoformat(iso_time).timestamp())
+    except AttributeError:
+        # Python < v3.7
+        dstr, tstr = iso_time.split("T")
+        year = int(dstr[:4])
+        month = int(dstr[5:7])
+        day = int(dstr[8:10])
+        hour = int(tstr[:2])
+        minute = int(tstr[3:5])
+        second = int(tstr[6:8])
+        tz_pos = (tstr.find("-") + 1 or tstr.find("+") + 1) - 1
+        tz_hour = int(tstr[tz_pos + 1 : tz_pos + 3])
+        tz_minute = int(tstr[tz_pos + 4 : tz_pos + 6])
+        if all(x == 0 for x in (tz_hour, tz_minute)):
+            tz = datetime.timezone.utc
+        else:
+            tz_sign = -1 if tstr[tz_pos] == "-" else 1
+            td = datetime.timedelta(hours=tz_hour, minutes=tz_minute)
+            tz = datetime.timezone(tz_sign * td)
+        return int(
+            datetime.datetime(year, month, day, hour, minute, second, 0, tz).timestamp()
+        )
+
+
+class DurationMixin:
+    """
+    Mixin that handles expiration with time
     """
 
     def __init__(
         self,
-        lease_id,
-        renewable,
-        lease_duration,
+        renewable=False,
+        duration=0,
         creation_time=None,
-        auth=None,
-        data=None,
-        **kwargs,  # pylint: disable=unused-argument
+        expire_time=None,
+        **kwargs,
     ):
-        self.id = lease_id
+        if "lease_duration" in kwargs:
+            duration = kwargs.pop("lease_duration")
         self.renewable = renewable
-        self.lease_duration = lease_duration
-        if creation_time is not None:
-            try:
-                creation_time = int(creation_time)
-            except ValueError:
-                creation_time = _fromisoformat(creation_time)
-        self.creation_time = (
-            creation_time if creation_time is not None else int(round(time.time()))
+        self.duration = duration
+        creation_time = (
+            creation_time if creation_time is not None else round(time.time())
         )
-        self.auth = auth
-        self.data = data
+        try:
+            creation_time = int(creation_time)
+        except ValueError:
+            creation_time = iso_to_timestamp(creation_time)
+        self.creation_time = creation_time
 
-    def is_valid(self, valid_for=0):
+        expire_time = (
+            expire_time if expire_time is not None else round(time.time()) + duration
+        )
+        try:
+            expire_time = int(expire_time)
+        except ValueError:
+            expire_time = iso_to_timestamp(expire_time)
+        self.expire_time = expire_time
+        super().__init__(**kwargs)
+
+    def is_renewable(self):
         """
-        Checks whether the lease is valid
+        Checks whether the lease is renewable
+        """
+        return self.renewable
+
+    def is_valid_for(self, valid_for=0, blur=0):
+        """
+        Checks whether the entity is valid
 
         valid_for
-            Allows to check whether the lease will still be valid in the future.
+            Check whether the entity will still be valid in the future.
             This can be an integer, which will be interpreted as seconds, or a
             time string using the same format as Vault does:
-            Suffix ``s`` for seconds, ``m`` for minuts, ``h`` for hours, ``d`` for days.
+            Suffix ``s`` for seconds, ``m`` for minutes, ``h`` for hours, ``d`` for days.
+            Defaults to 0.
+
+        blur
+            Allow undercutting ``valid_for`` for this amount of seconds.
             Defaults to 0.
         """
-        if not self.lease_duration:
+        if not self.duration:
             return True
-        return self.creation_time + self.lease_duration > time.time() + timestring_map(
-            valid_for
-        )
+        delta = self.expire_time - time.time() - timestring_map(valid_for)
+        if delta >= 0:
+            return True
+        return abs(delta) <= blur
 
-    def with_(self, **kwargs):
+
+class UseCountMixin:
+    """
+    Mixin that handles expiration with number of uses
+    """
+
+    def __init__(self, num_uses=0, use_count=0, **kwargs):
+        self.num_uses = num_uses
+        self.use_count = use_count
+        super().__init__(**kwargs)
+
+    def used(self):
         """
-        Partially update the contained data
+        Increment the use counter by one.
         """
-        attrs = copy.copy(self.__dict__)
-        attrs.update(kwargs)
-        return type(self)(**attrs)
+        self.use_count += 1
+
+    def has_uses_left(self, uses=1):
+        """
+        Check whether this entity has uses left.
+        """
+        return self.num_uses == 0 or self.num_uses - (self.use_count + uses) >= 0
+
+
+class DropInitKwargsMixin:
+    """
+    Mixin that breaks the chain of passing unhandled kwargs up the MRO.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args)
+
+
+class AccessorMixin:
+    """
+    Mixin that manages accessor information relevant for tokens/secret IDs
+    """
+
+    def __init__(self, accessor=None, wrapped_accessor=None, **kwargs):
+        self.accessor = accessor if wrapped_accessor is None else wrapped_accessor
+        self.wrapping_accessor = accessor if wrapped_accessor is not None else None
+        super().__init__(**kwargs)
+
+    def accessor_payload(self):
+        if self.accessor is not None:
+            return {"accessor": self.accessor}
+        raise VaultInvocationError("No accessor information available")
+
+
+class BaseLease(DurationMixin, DropInitKwargsMixin):
+    """
+    Base class for leases that expire with time.
+    """
+
+    def __init__(self, lease_id, **kwargs):
+        self.id = self.lease_id = lease_id
+        super().__init__(**kwargs)
 
     def __str__(self):
         return self.id
@@ -1598,7 +1790,17 @@ class VaultLease:
             data = other.__dict__
         except AttributeError:
             data = other
-        return self.__dict__ == data
+        return data == self.__dict__
+
+    def with_renewed(self, **kwargs):
+        """
+        Partially update the contained data after lease renewal
+        """
+        attrs = copy.copy(self.__dict__)
+        # ensure expire_time is reset properly
+        attrs.pop("expire_time")
+        attrs.update(kwargs)
+        return type(self)(**attrs)
 
     def to_dict(self):
         """
@@ -1607,69 +1809,475 @@ class VaultLease:
         return self.__dict__
 
 
-class VaultCache:
+class VaultLease(BaseLease):
     """
-    Encapsulates session and other cache backends for a single domain
-    like secret path metadata.
+    Data object representing a Vault lease.
     """
 
-    def __init__(self, config, opts, context, cbank, ckey, ttl=None, cache=None):
-        self.config = config
-        self.opts = opts
+    def __init__(self, lease_id, data, **kwargs):
+        # save lease-associated data
+        self.data = data
+        super().__init__(lease_id, **kwargs)
+
+    def is_valid(self, valid_for=0, blur=0):
+        """
+        Checks whether the lease is valid for an amount of time
+
+        valid_for
+            Check whether the token will still be valid in the future.
+            This can be an integer, which will be interpreted as seconds, or a
+            time string using the same format as Vault does:
+            Suffix ``s`` for seconds, ``m`` for minutes, ``h`` for hours, ``d`` for days.
+            Defaults to 0.
+
+        blur
+            Allow undercutting ``valid_for`` for this amount of seconds.
+            Defaults to 0.
+        """
+        return self.is_valid_for(valid_for, blur=blur)
+
+
+class VaultToken(UseCountMixin, AccessorMixin, BaseLease):
+    """
+    Data object representing an authentication token
+    """
+
+    def __init__(self, **kwargs):
+        if "client_token" in kwargs:
+            # Ensure response data from Vault is accepted as well
+            kwargs["lease_id"] = kwargs.pop("client_token")
+        super().__init__(**kwargs)
+
+    def is_valid(self, valid_for=0, uses=1):
+        """
+        Checks whether the token is valid for an amount of time and number of uses
+
+        valid_for
+            Check whether the token will still be valid in the future.
+            This can be an integer, which will be interpreted as seconds, or a
+            time string using the same format as Vault does:
+            Suffix ``s`` for seconds, ``m`` for minutes, ``h`` for hours, ``d`` for days.
+            Defaults to 0.
+
+        uses
+            Check whether the token has at least this number of uses left. Defaults to 1.
+        """
+        return self.is_valid_for(valid_for) and self.has_uses_left(uses)
+
+    def is_renewable(self):
+        """
+        Check whether the token is renewable, which requires it
+        to be currently valid for at least two uses and renewable
+        """
+        # Renewing a token deducts a use, hence it does not make sense to
+        # renew a token on the last use
+        return self.renewable and self.is_valid(uses=2)
+
+    def payload(self):
+        """
+        Return the payload to use for POST requests using this token
+        """
+        return {"token": str(self)}
+
+    def serialize_for_minion(self):
+        """
+        Serialize all necessary data to recreate this object
+        into a dict that can be sent to a minion.
+        """
+        return {
+            "client_token": self.id,
+            "renewable": self.renewable,
+            "lease_duration": self.duration,
+            "num_uses": self.num_uses,
+            "creation_time": self.creation_time,
+            "expire_time": self.expire_time,
+        }
+
+
+class VaultSecretId(UseCountMixin, AccessorMixin, BaseLease):
+    """
+    Data object representing an AppRole secret ID.
+    """
+
+    def __init__(self, **kwargs):
+        if "secret_id" in kwargs:
+            # Ensure response data from Vault is accepted as well
+            kwargs["lease_id"] = kwargs.pop("secret_id")
+            kwargs["lease_duration"] = kwargs.pop("secret_id_ttl")
+            kwargs["num_uses"] = kwargs.pop("secret_id_num_uses", 0)
+            kwargs["accessor"] = kwargs.pop("secret_id_accessor", None)
+        super().__init__(**kwargs)
+
+    def is_valid(self, valid_for=0, uses=1):  # pylint: disable=arguments-differ
+        """
+        Checks whether the secret ID is valid for an amount of time and number of uses
+
+        valid_for
+            Check whether the secret ID will still be valid in the future.
+            This can be an integer, which will be interpreted as seconds, or a
+            time string using the same format as Vault does:
+            Suffix ``s`` for seconds, ``m`` for minutes, ``h`` for hours, ``d`` for days.
+            Defaults to 0.
+
+        uses
+            Check whether the secret ID has at least this number of uses left. Defaults to 1.
+        """
+        return self.is_valid_for(valid_for) and self.has_uses_left(uses)
+
+    def payload(self):
+        """
+        Return the payload to use for POST requests using this secret ID
+        """
+        return {"secret_id": str(self)}
+
+    def serialize_for_minion(self):
+        """
+        Serialize all necessary data to recreate this object
+        into a dict that can be sent to a minion.
+        """
+        return {
+            "secret_id": self.id,
+            "secret_id_ttl": self.duration,
+            "secret_id_num_uses": self.num_uses,
+            "creation_time": self.creation_time,
+            "expire_time": self.expire_time,
+        }
+
+
+class VaultWrappedResponse(AccessorMixin, BaseLease):
+    """
+    Data object representing a wrapped response
+    """
+
+    def __init__(
+        self,
+        token,
+        ttl,
+        creation_path,
+        wrapped_accessor=None,
+        **kwargs,
+    ):
+        super().__init__(lease_id=token, lease_duration=ttl, renewable=False, **kwargs)
+        self.creation_path = creation_path
+        self.wrapped_accessor = wrapped_accessor
+
+    def serialize_for_minion(self):
+        """
+        Serialize all necessary data to recreate this object
+        into a dict that can be sent to a minion.
+        """
+        return {
+            "wrap_info": {
+                "token": self.id,
+                "ttl": self.duration,
+                "creation_time": self.creation_time,
+                "creation_path": self.creation_path,
+            },
+        }
+
+
+class CommonCache:
+    """
+    Base class that unifies context and other cache backends.
+    """
+
+    def __init__(self, context, cbank, cache_backend=None, ttl=None):
         self.context = context
         self.cbank = cbank
-        self.ckey = ckey
+        self.cache = cache_backend
         self.ttl = ttl
-        self.cache = cache if cache is not None else _get_cache_backend(config, opts)
 
-    def exists(self):
-        """
-        Check whether data for this domain exists
-        """
-        if self.cbank in self.context and self.ckey in self.context[self.cbank]:
+    def _ckey_exists(self, ckey, flush=True):
+        if self.cbank in self.context and ckey in self.context[self.cbank]:
             return True
         if self.cache is not None:
-            if not self.cache.contains(self.cbank, self.ckey):
+            if not self.cache.contains(self.cbank, ckey):
                 return False
             if self.ttl is not None:
-                updated = self.cache.updated(self.cbank, self.ckey)
+                updated = self.cache.updated(self.cbank, ckey)
                 if int(time.time()) - updated >= self.ttl:
-                    log.debug("Cached data outdated, flushing.")
-                    self.flush()
+                    if flush:
+                        log.debug(
+                            f"Cached data in {self.cbank}/{ckey} outdated, flushing."
+                        )
+                        self.flush()
                     return False
             return True
         return False
 
-    def get(self):
+    def _get_ckey(self, ckey, flush=True):
+        if not self._ckey_exists(ckey, flush=flush):
+            return None
+        if self.cbank in self.context and ckey in self.context[self.cbank]:
+            return self.context[self.cbank][ckey]
+        if self.cache is not None:
+            return (
+                self.cache.fetch(self.cbank, ckey) or None
+            )  # account for race conditions
+        raise RuntimeError("This code path should not have been hit.")
+
+    def _store_ckey(self, ckey, value):
+        if self.cache is not None:
+            self.cache.store(self.cbank, ckey, value)
+        if self.cbank not in self.context:
+            self.context[self.cbank] = {}
+        self.context[self.cbank][ckey] = value
+
+    def _flush(self, ckey=None):
+        if self.cache is not None:
+            self.cache.flush(self.cbank, ckey)
+        if self.cbank in self.context:
+            if ckey is None:
+                self.context.pop(self.cbank)
+            else:
+                self.context[self.cbank].pop(ckey, None)
+        # also remove sub-banks from context to mimic cache behavior
+        if ckey is None:
+            for bank in list(self.context):
+                if bank.startswith(self.cbank):
+                    self.context.pop(bank)
+
+    def _list(self):
+        ckeys = []
+        if self.cbank in self.context:
+            ckeys += list(self.context[self.cbank])
+        if self.cache is not None:
+            ckeys += self.cache.list(self.cbank)
+        return set(ckeys)
+
+
+class VaultCache(CommonCache):
+    """
+    Encapsulates session and other cache backends for a single domain
+    like secret path metadata. Uses a single cache key.
+    """
+
+    def __init__(self, context, cbank, ckey, cache_backend=None, ttl=None):
+        super().__init__(context, cbank, cache_backend=cache_backend, ttl=ttl)
+        self.ckey = ckey
+
+    def exists(self, flush=True):
+        """
+        Check whether data for this domain exists
+        """
+        return self._ckey_exists(self.ckey, flush=flush)
+
+    def get(self, flush=True):
         """
         Return the cached data for this domain or None
         """
-        if not self.exists():
-            return None
-        if self.cbank in self.context and self.ckey in self.context[self.cbank]:
-            return self.context[self.cbank][self.ckey]
-        if self.cache is not None:
-            return self.cache.fetch(self.cbank, self.ckey)
-        raise RuntimeError("This code path should not have been hit.")
+        return self._get_ckey(self.ckey, flush=flush)
 
-    def flush(self):
+    def flush(self, cbank=False):
         """
         Flush the cache for this domain
         """
-        if self.cache is not None:
-            self.cache.flush(self.cbank, self.ckey)
-        if self.cbank in self.context:
-            self.context[self.cbank].pop(self.ckey, None)
+        return self._flush(self.ckey if not cbank else None)
 
     def store(self, value):
         """
         Store data for this domain
         """
-        if self.cache is not None:
-            self.cache.store(self.cbank, self.ckey, value)
-        if self.cbank not in self.context:
-            self.context[self.cbank] = {}
-        self.context[self.cbank][self.ckey] = value
+        return self._store_ckey(self.ckey, value)
+
+
+class VaultConfigCache(VaultCache):
+    """
+    Handles caching of received configuration
+    """
+
+    def __init__(
+        self,
+        context,
+        cbank,
+        ckey,
+        opts,
+        cache_backend_factory=_get_cache_backend,
+        init_config=None,
+    ):  # pylint: disable=super-init-not-called
+        self.context = context
+        self.cbank = cbank
+        self.ckey = ckey
+        self.opts = opts
+        self.config = None
+        self.cache = None
+        self.ttl = None
+        self.cache_backend_factory = cache_backend_factory
+        if init_config is not None:
+            self._load(init_config)
+
+    def exists(self, flush=True):
+        """
+        Check if a configuration has been loaded and cached
+        """
+        if self.config is None:
+            return False
+        return super().exists(flush=flush)
+
+    def get(self, flush=True):
+        """
+        Return the current cached configuration
+        """
+        if self.config is None:
+            return None
+        return super().get(flush=flush)
+
+    def flush(self, cbank=True):
+        """
+        Flush all connection-scoped data
+        """
+        if self.config is None:
+            log.warning(
+                "Tried to flush uninitialized configuration cache. Skipping flush."
+            )
+            return
+        # flush the whole connection-scoped cache by default
+        super().flush(cbank=cbank)
+        self.config = None
+        self.cache = None
+        self.ttl = None
+
+    def _load(self, config):
+        if self.config is not None:
+            if (
+                self.config["cache"]["backend"] != "session"
+                and self.config["cache"]["backend"] != config["cache"]["backend"]
+            ):
+                self.flush()
+        self.config = config
+        self.cache = self.cache_backend_factory(self.config, self.opts)
+        self.ttl = self.config["cache"]["config"]
+
+    def store(self, value):
+        """
+        Reload cache configuration, then store the new Vault configuration,
+        overwriting the existing one.
+        """
+        self._load(value)
+        super().store(value)
+
+
+class LeaseCacheMixin:
+    """
+    Mixin for auth and lease cache that checks validity
+    and acts with hydrated objects
+    """
+
+    def __init__(self, *args, **kwargs):
+        self.lease_cls = kwargs.pop("lease_cls", VaultLease)
+        super().__init__(*args, **kwargs)
+
+    def _check_validity(self, lease_data, valid_for=0):
+        lease = self.lease_cls(**lease_data)
+        if lease.is_valid(valid_for):
+            log.debug("Using cached lease.")
+            return lease
+        return None
+
+
+class VaultLeaseCache(LeaseCacheMixin, CommonCache):
+    """
+    Handles caching of Vault leases. Supports multiple cache keys.
+    Checks whether cached leases are still valid before returning.
+    """
+
+    def get(self, ckey, valid_for=0, flush=True):
+        """
+        Returns valid cached lease data or None.
+        Flushes cache if invalid by default.
+        """
+        data = self._get_ckey(ckey, flush=flush)
+        if data is None:
+            return data
+        ret = self._check_validity(data, valid_for=valid_for)
+        if ret is None and flush:
+            log.debug("Cached lease not valid anymore. Flushing cache.")
+            self._flush(ckey)
+        return ret
+
+    def store(self, ckey, value):
+        """
+        Store a lease in cache
+        """
+        try:
+            value = value.to_dict()
+        except AttributeError:
+            pass
+        return self._store_ckey(ckey, value)
+
+    def exists(self, ckey, flush=True):
+        """
+        Check whether a named lease exists in cache
+        """
+        return self._ckey_exists(ckey, flush=flush)
+
+    def flush(self, ckey=None):
+        """
+        Flush the lease cache or a single lease from the lease cache
+        """
+        return self._flush(ckey)
+
+    def list(self):
+        """
+        List all cached leases. Does not filter invalid ones,
+        so fetching a reported one might still return None.
+        """
+        return self._list()
+
+
+class VaultAuthCache(LeaseCacheMixin, CommonCache):
+    """
+    Implements authentication secret-specific caches. Checks whether
+    the cached secrets are still valid before returning.
+    """
+
+    def __init__(self, context, cbank, ckey, auth_cls, cache_backend=None, ttl=None):
+        super().__init__(
+            context, cbank, lease_cls=auth_cls, cache_backend=cache_backend, ttl=ttl
+        )
+        self.ckey = ckey
+
+    def exists(self, flush=True):
+        """
+        Check whether data for this domain exists
+        """
+        return self._ckey_exists(self.ckey, flush=flush)
+
+    def get(self, valid_for=0, flush=True):
+        """
+        Returns valid cached auth data or None.
+        Flushes cache if invalid by default.
+        """
+        data = self._get_ckey(self.ckey, flush=flush)
+        if data is None:
+            return data
+        ret = self._check_validity(data, valid_for=valid_for)
+        if ret is None and flush:
+            log.debug("Cached auth data not valid anymore. Flushing cache.")
+            self.flush()
+        return ret
+
+    def store(self, value):
+        """
+        Store an auth credential in cache. Will overwrite possibly existing one.
+        """
+        try:
+            value = value.to_dict()
+        except AttributeError:
+            pass
+        return self._store_ckey(self.ckey, value)
+
+    def flush(self, cbank=None):
+        """
+        Flush the cached auth credentials. If this is a token cache,
+        flushing it will delete the whole session-scoped cache bank by default.
+        """
+        if cbank is None:
+            # flush the whole cbank (session-scope) if this is a token cache by default
+            ckey = None if self.lease_cls is VaultToken else self.ckey
+        else:
+            ckey = None if cbank else self.ckey
+        return self._flush(ckey)
 
 
 def _get_config_cache(opts, context, cbank, ckey):
@@ -1693,111 +2301,7 @@ def _get_config_cache(opts, context, cbank, ckey):
                 # expiration check is done inside the class
                 config = cache.fetch(cbank, ckey)
 
-    return VaultConfigCache(opts, context, cbank, ckey, init_config=config)
-
-
-class VaultConfigCache(VaultCache):
-    def __init__(
-        self, opts, context, cbank, ckey, init_config=None
-    ):  # pylint: disable=super-init-not-called
-        self.opts = opts
-        self.context = context
-        self.cbank = cbank
-        self.ckey = ckey
-        self.config = None
-        self.cache = None
-        self.ttl = None
-        if init_config is not None:
-            self._load(init_config)
-
-    def exists(self):
-        if self.config is None:
-            return False
-        return super().exists()
-
-    def get(self):
-        if self.config is None:
-            return None
-        return super().get()
-
-    def flush(self):
-        """
-        Flush all connection-scoped data
-        """
-        if self.config is None:
-            log.warning(
-                "Tried to flush uninitialized configuration cache. Skipping flush."
-            )
-            return
-        # flush the whole connection-scoped cache
-        if self.cache is not None:
-            self.cache.flush(self.cbank)
-        if self.cbank in self.context:
-            self.context.pop(self.cbank, None)
-        self.config = None
-        self.cache = None
-        self.ttl = None
-
-    def _load(self, config):
-        if self.config is not None:
-            if (
-                self.config["cache"]["backend"] != "session"
-                and self.config["cache"]["backend"] != config["cache"]["backend"]
-            ):
-                self.flush()
-        self.config = config
-        self.cache = _get_cache_backend(self.config, self.opts)
-        self.ttl = self.config["cache"]["config"]
-
-    def store(self, value):
-        self._load(value)
-        super().store(value)
-
-
-class VaultLeaseCache(VaultCache):
-    def __init__(
-        self, config, opts, context, cbank, ckey, lease_cls=VaultLease, ttl=None
-    ):
-        super().__init__(config, opts, context, cbank, ckey, ttl=ttl)
-        self.lease_cls = lease_cls
-
-    def get(self, valid_for=0):  # pylint: disable=arguments-differ
-        """
-        Returns valid cached authentication data or None
-        """
-        if not self.exists():
-            return None
-        data = super().get()
-        lease = self.lease_cls(**data)
-        if lease.is_valid(valid_for):
-            log.debug("Using cached lease.")
-            return lease
-        log.debug("Cached lease not valid anymore.")
-        self.flush()
-        return None
-
-    def store(self, value):
-        """
-        Store auth data
-        """
-        if isinstance(value, VaultLease):
-            value = value.to_dict()
-        return super().store(value)
-
-
-class VaultAuthCache(VaultLeaseCache):
-    """
-    Implements authentication secret-specific caches. Checks whether
-    the cached secrets are still valid before returning.
-    """
-
-    def __init__(self, config, opts, context, cbank, ckey, auth_cls, ttl=None):
-        if ttl is None:
-            if config["cache"]["secret"] != "ttl":
-                ttl = config["cache"]["secret"]
-        super().__init__(
-            config, opts, context, cbank, ckey, lease_cls=auth_cls, ttl=ttl
-        )
+    return VaultConfigCache(context, cbank, ckey, opts, init_config=config)
 
 
 class VaultTokenAuth:
@@ -1817,10 +2321,10 @@ class VaultTokenAuth:
 
     def is_renewable(self):
         """
-        Check whether the contained token is renewable,
-        which requires it to be valid and renewable
+        Check whether the contained token is renewable, which requires it
+        to be currently valid for at least two uses and renewable
         """
-        return self.is_valid() and self.token.renewable
+        return self.token.is_renewable()
 
     def is_valid(self, valid_for=0):
         """
@@ -1849,7 +2353,7 @@ class VaultTokenAuth:
         """
         Partially update the contained token (e.g. after renewal)
         """
-        self.token = self.token.with_(**auth)
+        self.token = self.token.with_renewed(**auth)
         self._write_cache()
 
     def replace_token(self, token):
@@ -1884,7 +2388,7 @@ class VaultAppRoleAuth:
     def is_renewable(self):
         """
         Check whether the currently used token is renewable.
-        Secret IDs are not renewable.
+        Secret IDs are not renewable anyways.
         """
         return self.token.is_renewable()
 
@@ -1931,11 +2435,11 @@ class VaultAppRoleAuth:
 
     def _write_cache(self):
         if self.cache is not None and self.approle.secret_id is not None:
-            if isinstance(self.approle.secret_id, LocalVaultAppRoleSecretId):
+            if isinstance(self.approle.secret_id, LocalVaultSecretId):
                 pass
-            elif self.approle.secret_id.secret_id_num_uses == 0:
+            elif self.approle.secret_id.num_uses == 0:
                 pass
-            elif self.approle.is_valid():
+            elif self.approle.secret_id.is_valid():
                 self.cache.store(self.approle.secret_id)
             else:
                 self.cache.flush()
@@ -1944,227 +2448,10 @@ class VaultAppRoleAuth:
         self.token.replace_token(VaultToken(**auth))
 
 
-def _fromisoformat(creation_time):
-    """
-    Most endpoints respond with RFC3339-formatted strings
-    This is a hacky way to use inbuilt tools only
-    """
-    # drop subsecond precision to make it easier on us
-    # (length would need to be 3, 6 or 9)
-    creation_time = re.sub(r"\.[\d]+", "", creation_time)
-    creation_time = re.sub(r"Z$", "+00:00", creation_time)
-    try:
-        # Python >=v3.7
-        return int(datetime.datetime.fromisoformat(creation_time).timestamp())
-    except AttributeError:
-        # Python < v3.7
-        dstr, tstr = creation_time.split("T")
-        year = int(dstr[:4])
-        month = int(dstr[5:7])
-        day = int(dstr[8:10])
-        hour = int(tstr[:2])
-        minute = int(tstr[3:5])
-        second = int(tstr[6:8])
-        tz_pos = (tstr.find("-") + 1 or tstr.find("+") + 1) - 1
-        tz_hour = int(tstr[tz_pos + 1 : tz_pos + 3])
-        tz_minute = int(tstr[tz_pos + 4 : tz_pos + 6])
-        if all(x == 0 for x in (tz_hour, tz_minute)):
-            tz = datetime.timezone.utc
-        else:
-            tz_sign = -1 if "-" == tstr[tz_pos] else 1
-            td = datetime.timedelta(hours=tz_hour, minutes=tz_minute)
-            tz = datetime.timezone(tz_sign * td)
-        return int(
-            datetime.datetime(year, month, day, hour, minute, second, 0, tz).timestamp()
-        )
-
-
-class VaultWrappedResponse(VaultLease):
-    """
-    Data object representing a wrapped response
-    """
-
-    def __init__(
-        self,
-        token,
-        ttl,
-        creation_time,
-        creation_path,
-        accessor=None,
-        wrapped_accessor=None,
-        **kwargs,
-    ):
-        self.accessor = accessor
-        self.wrapped_accessor = wrapped_accessor
-        self.creation_path = creation_path
-        super().__init__(
-            token,
-            renewable=False,
-            lease_duration=ttl,
-            creation_time=creation_time,
-            **kwargs,
-        )
-        self.token = self.id
-        self.ttl = self.lease_duration
-
-    def serialize_for_minion(self):
-        return {
-            "wrap_info": {
-                "token": self.id,
-                "ttl": self.ttl,
-                "creation_time": self.creation_time,
-                "creation_path": self.creation_path,
-            },
-        }
-
-
-class VaultAppRoleSecretId(VaultLease):
-    """
-    Data object representing an AppRole secret-id.
-    """
-
-    def __init__(
-        self,
-        secret_id,
-        secret_id_ttl,
-        secret_id_num_uses=None,
-        creation_time=None,
-        use_count=0,
-        **kwargs,
-    ):
-        self.num_uses = self.secret_id_num_uses = secret_id_num_uses
-        self.use_count = use_count
-        super().__init__(
-            secret_id,
-            renewable=False,
-            lease_duration=secret_id_ttl,
-            creation_time=creation_time,
-        )
-        self.secret_id_ttl = self.lease_duration
-        self.secret_id = self.id
-
-    def payload(self):
-        """
-        Return the payload to use for POST requests using this secret-id
-        """
-        return {"secret_id": str(self)}
-
-    def is_valid(self, valid_for=0):
-        """
-        Check whether this secret ID is valid. Takes into account
-        the maximum number of uses, if they are known, and lease duration.
-
-        valid_for
-            Allows to check whether the secret ID will still be valid in the future.
-            This can be an integer, which will be interpreted as seconds, or a
-            time string using the same format as Vault does:
-            Suffix ``s`` for seconds, ``m`` for minuts, ``h`` for hours, ``d`` for days.
-            Defaults to 0.
-        """
-        return super().is_valid(valid_for) and (
-            self.num_uses is None
-            or self.num_uses == 0
-            or self.num_uses - self.use_count > 0
-        )
-
-    def used(self):
-        """
-        Increment the use counter of this secret-id by one.
-        """
-        self.use_count += 1
-
-    def serialize_for_minion(self):
-        """
-        Serialize all necessary data to recreate this object
-        into a dict that can be sent to a minion.
-        """
-        data = {
-            "secret_id": self.secret_id,
-            "secret_id_ttl": self.secret_id_ttl,
-            "creation_time": self.creation_time,
-        }
-        if self.secret_id_num_uses is not None:
-            data["secret_id_num_uses"] = self.secret_id_num_uses
-        return data
-
-
-class LocalVaultAppRoleSecretId(VaultAppRoleSecretId):
+class LocalVaultSecretId(VaultSecretId):
     """
     Represents a secret ID from local configuration and should not be cached.
     """
-
-
-class VaultToken(VaultLease):
-    """
-    Data object representing an authentication token
-    """
-
-    def __init__(
-        self,
-        client_token,
-        renewable,
-        lease_duration,
-        num_uses,
-        accessor=None,
-        entity_id=None,
-        creation_time=None,
-        use_count=0,
-        **kwargs,
-    ):
-        self.accessor = accessor
-        self.num_uses = num_uses
-        self.entity_id = entity_id
-        self.use_count = use_count
-        super().__init__(
-            client_token,
-            renewable=renewable,
-            lease_duration=lease_duration,
-            creation_time=creation_time,
-        )
-        # instantiation is currently suboptimal
-        # this is needed to make new copies with updated params
-        self.client_token = self.id
-
-    def is_valid(self, valid_for=0):
-        """
-        Check whether this token is valid. Takes into account
-        the maximum number of uses, and lease duration.
-
-        valid_for
-            Allows to check whether the secret ID will still be valid in the future.
-            This can be an integer, which will be interpreted as seconds, or a
-            time string using the same format as Vault does:
-            Suffix ``s`` for seconds, ``m`` for minuts, ``h`` for hours, ``d`` for days.
-            Defaults to 0.
-        """
-        return super().is_valid(valid_for) and (
-            self.num_uses == 0 or self.num_uses - self.use_count > 0
-        )
-
-    def used(self):
-        """
-        Increment the use counter of this token by one.
-        """
-        self.use_count += 1
-
-    def payload(self):
-        """
-        Return the payload to use for POST requests using this token
-        """
-        return {"token": str(self)}
-
-    def serialize_for_minion(self):
-        """
-        Serialize all necessary data to recreate this object
-        into a dict that can be sent to a minion.
-        """
-        return {
-            "client_token": self.client_token,
-            "renewable": self.renewable,
-            "lease_duration": self.lease_duration,
-            "num_uses": self.num_uses,
-            "creation_time": self.creation_time,
-        }
 
 
 class VaultAppRole:
@@ -2178,11 +2465,11 @@ class VaultAppRole:
 
     def replace_secret_id(self, secret_id):
         """
-        Replace the contained secret-id with a new one
+        Replace the contained secret ID with a new one
         """
         self.secret_id = secret_id
 
-    def is_valid(self, valid_for=0):
+    def is_valid(self, valid_for=0, uses=1):
         """
         Checks whether the contained data can be used to authenticate
         to Vault. Secret IDs might not be required by the server when
@@ -2192,14 +2479,20 @@ class VaultAppRole:
             Allows to check whether the AppRole will still be valid in the future.
             This can be an integer, which will be interpreted as seconds, or a
             time string using the same format as Vault does:
-            Suffix ``s`` for seconds, ``m`` for minuts, ``h`` for hours, ``d`` for days.
+            Suffix ``s`` for seconds, ``m`` for minutes, ``h`` for hours, ``d`` for days.
             Defaults to 0.
+
+        uses
+            Check whether the AppRole has at least this number of uses left. Defaults to 1.
         """
         if self.secret_id is None:
             return True
-        return self.secret_id.is_valid(valid_for)
+        return self.secret_id.is_valid(valid_for=valid_for, uses=uses)
 
     def used(self):
+        """
+        Increment the secret ID use counter by one, if this AppRole uses one.
+        """
         if self.secret_id is not None:
             self.secret_id.used()
 
@@ -2220,15 +2513,15 @@ class InvalidVaultToken(VaultToken):
         self.use_count = 0
         self.num_uses = 0
 
-    def is_valid(self, valid_for=0):
+    def is_valid(self, valid_for=0, uses=1):
         return False
 
 
-class InvalidVaultAppRoleSecretId(VaultAppRoleSecretId):
+class InvalidVaultSecretId(VaultSecretId):
     def __init__(self, *args, **kwargs):  # pylint: disable=super-init-not-called
         pass
 
-    def is_valid(self, valid_for=0):
+    def is_valid(self, valid_for=0, uses=1):
         return False
 
 
@@ -2449,6 +2742,167 @@ class VaultKV:
         return ret
 
 
+class LeaseStore:
+    """
+    Caches leases and handles lease operations
+    """
+
+    def __init__(self, client, cache):
+        self.client = client
+        self.cache = cache
+
+    def get(
+        self,
+        ckey,
+        valid_for=0,
+        renew=True,
+        renew_increment=None,
+        renew_blur=2,
+        flush=True,
+    ):
+        """
+        Return cached lease or None.
+
+        ckey
+            Cache key the lease has been saved in.
+
+        valid_for
+            Ensure the returned lease is valid for at least this amount of time.
+            This can be an integer, which will be interpreted as seconds, or a
+            time string using the same format as Vault does:
+            Suffix ``s`` for seconds, ``m`` for minutes, ``h`` for hours, ``d`` for days.
+            Defaults to 0.
+
+            .. note::
+
+                This does not take into account token validity, which active leases
+                are bound to as well.
+
+        renew
+            If the lease is still valid, but not valid for ``valid_for``, attempt to
+            renew it. Defaults to true.
+
+        renew_increment
+            When renewing, request the lease to be valid for this amount of time from
+            the current point of time onwards.
+            If unset, will renew the lease by its default validity period and, if
+            the renewed lease does not pass ``valid_for``, will try to renew it
+            by ``valid_for``.
+
+        renew_blur
+            When checking validity after renewal, allow this amount of seconds in leeway
+            to account for latency. Especially important when renew_increment is unset
+            and the default validity period is less than ``valid_for``.
+            Defaults to 2.
+
+        flush
+            If the lease is invalid or not valid for ``valid_for`` and renewals
+            are disabled or impossible, flush the cache. Defaults to true.
+        """
+        if renew_increment is not None and timestring_map(valid_for) > timestring_map(
+            renew_increment
+        ):
+            raise VaultInvocationError(
+                "When renew_increment is set, it must be at least valid_for to make sense"
+            )
+
+        def check_flush():
+            if flush:
+                self.cache.flush(ckey)
+            return None
+
+        def renew_lease(increment):
+            try:
+                ret = self.renew(lease, increment=increment)
+            except (VaultNotFoundError, VaultPermissionDeniedError):
+                ret = {}
+            # Do not overwrite data of renewed leases!
+            ret.pop("data", None)
+            return lease.with_renewed(**ret)
+
+        # Since we can renew leases, do not check for future validity in cache
+        lease = self.cache.get(ckey, flush=flush)
+        if lease is None or lease.is_valid(valid_for):
+            return lease
+        if not renew:
+            return check_flush()
+        lease = renew_lease(renew_increment)
+        if not lease.is_valid(valid_for, blur=renew_blur):
+            if renew_increment is not None:
+                # valid_for cannot possibly be respected
+                return check_flush()
+            # Maybe valid_for is greater than the default validity period, so check if
+            # the lease can be renewed by valid_for
+            lease = renew_lease(valid_for)
+            if not lease.is_valid(valid_for, blur=renew_blur):
+                return check_flush()
+        # Ensure the new validity is cached
+        self.cache.store(ckey, lease)
+        return lease
+
+    def list(self):
+        """
+        List all cached leases.
+        """
+        return self.cache.list()
+
+    def lookup(self, lease):
+        """
+        Lookup lease meta information.
+
+        lease
+            A lease ID or VaultLease object to look up.
+        """
+        endpoint = "sys/leases/lookup"
+        payload = {"lease_id": str(lease)}
+        return self.client.post(endpoint, payload=payload)
+
+    def renew(self, lease, increment=None):
+        """
+        Renew a lease.
+
+        lease
+            A lease ID or VaultLease object to renew.
+
+        increment
+            Request the lease to be valid for this amount of time from the current
+            point of time onwards. Can also be used to reduce the validity period.
+            The server might not honor this increment.
+            Can be an integer (seconds) or a time string like ``1h``. Optional.
+        """
+        endpoint = "sys/leases/renew"
+        payload = {"lease_id": str(lease)}
+        if increment is not None:
+            payload["increment"] = int(timestring_map(increment))
+        return self.client.post(endpoint, payload=payload)
+
+    def revoke(self, lease, sync=False):
+        """
+        Revoke a lease.
+
+        lease
+            A lease ID or VaultLease object to revoke.
+
+        sync
+            Only return once the lease has been revoked. Defaults to false.
+        """
+        endpoint = "sys/leases/renew"
+        payload = {"lease_id": str(lease), "sync": sync}
+        return self.client.post(endpoint, payload)
+
+    def store(self, ckey, lease):
+        """
+        Cache a lease.
+
+        ckey
+            The cache key the lease should be saved in.
+
+        lease
+            A lease ID or VaultLease object to store.
+        """
+        return self.cache.store(ckey, lease)
+
+
 ####################################################################################
 # The following functions were available in previous versions and are deprecated
 # TODO: remove deprecated functions after v3008 (Argon)
@@ -2488,6 +2942,7 @@ def get_vault_connection():
 
     if _get_salt_run_type(opts) in [
         SALT_RUNTYPE_MASTER_IMPERSONATING,
+        SALT_RUNTYPE_MASTER_PEER_RUN,
         SALT_RUNTYPE_MINION_REMOTE,
     ]:
         ret["lease_duration"] = token.explicit_max_ttl
@@ -2583,7 +3038,7 @@ def make_request(
 
     vault = _get_client(token, vault_url, namespace, args)
     res = vault.request_raw(method, endpoint, payload=payload, wrap=False, **args)
-    if 403 == res.status_code and not retry:
+    if res.status_code == 403 and not retry:
         # retry was used to indicate to only try once more
         clear_cache(opts, context)
         vault = _get_client(token, vault_url, namespace, args)

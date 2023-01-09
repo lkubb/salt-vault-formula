@@ -52,7 +52,7 @@ Minimally required configuration:
       server:
         url: https://vault.example.com:8200
 
-A sensible example configuration, e.g. in /etc/salt/master.d/vault.conf:
+A sensible example configuration, e.g. in ``/etc/salt/master.d/vault.conf``:
 
 .. code-block:: yaml
 
@@ -67,8 +67,8 @@ A sensible example configuration, e.g. in /etc/salt/master.d/vault.conf:
         token:
           role_name: salt_minion
           params:
-            ttl: 30
-            uses: 10
+            explicit_max_ttl: 30
+            num_uses: 10
       policies:
         assign:
           - salt_minion
@@ -190,6 +190,9 @@ All possible master configuration options with defaults:
         role_id: <required if auth:method == approle>
         secret_id: null
         token: <required if auth:method == token>
+        token_lifecycle:
+          minimum_ttl: 10
+          renew_increment: null
       cache:
         backend: session
         config: 3600
@@ -206,11 +209,21 @@ All possible master configuration options with defaults:
             secret_id_ttl: 60
             token_explicit_max_ttl: 60
             token_num_uses: 10
+            secret_id_bound_cidrs: null
+            token_ttl: null
+            token_max_ttl: null
+            token_no_default_policy: false
+            token_period: null
+            token_bound_cidrs: null
         token:
           role_name: null
           params:
+            explicit_max_ttl: null
+            num_uses: 1
             ttl: null
-            uses: 1
+            period: null
+            no_default_policy: false
+            renewable: true
         wrap: 30s
       keys: []
       metadata:
@@ -310,6 +323,38 @@ token
         dictionary that includes ``wrap_info``, i.e. the return payload
         of a wrapping request.
 
+token_lifecycle
+    Token renewal settings.
+
+    .. note::
+
+        This setting can be specified inside a minion's configuration as well
+        and will override the master's default for the minion.
+
+        Token lifecycle settings have significancy for any authentication method,
+        not just ``token``.
+
+    ``minimum_ttl`` specifies the time (in seconds or as a time string like ``24h``)
+    an in-use token should be valid for. If the current validity period is less
+    than this and the token is renewable, a renewal will be attempted. If it is
+    not renewable or a renewal does not extend the ttl beyond the specified minimum,
+    a new token will be generated.
+
+    .. note::
+
+        Since leases like database credentials are tied to a token, setting this to
+        a much higher value than the default can be necessary, depending on your
+        specific use case.
+
+    ``renew_increment`` specifies the amount of time the token's validity should
+    be requested to be renewed for when renewing a token. When unset, will extend
+    the token's validity by its initial ttl.
+    Set this to ``false`` to disable token renewals.
+
+    .. note::
+
+        The Vault server is allowed to disregard this request.
+
 ``cache``
 ~~~~~~~~~
 Configures configuration cache on minions and secret cache on all hosts as well
@@ -346,7 +391,7 @@ kv_metadata
 secret
     .. versionadded:: 3007.0
 
-    The time in seconds to cache tokens/secret-ids for. Defaults to ``ttl``,
+    The time in seconds to cache tokens/secret IDs for. Defaults to ``ttl``,
     which caches the secret for as long as it is valid, unless a new configuration
     is requested from the master.
 
@@ -374,7 +419,7 @@ approle
     to the Salt master.
 
     ``params`` configures the AppRole the master creates for minions. See the
-    `Vault API docs <https://www.vaultproject.io/api-docs/auth/approle#create-update-approle>`_
+    `Vault AppRole API docs <https://www.vaultproject.io/api-docs/auth/approle#create-update-approle>`_
     for details. If you update these params, you can update the minion AppRoles
     manually using the vault runner: ``salt-run vault.sync_approles``, but they
     will be updated automatically during a request by a minion as well.
@@ -393,9 +438,6 @@ token
     If omitted, minion tokens will be created without any role, thus being able
     to inherit any master token policy (including token creation capabilities).
 
-    For details please see:
-    https://www.vaultproject.io/api/auth/token/index.html#create-token
-
     Example configuration:
     https://www.nomadproject.io/docs/vault-integration/index.html#vault-token-role-configuration
 
@@ -405,12 +447,13 @@ token
 
         This used to be found in ``auth:ttl`` and ``auth:uses``.
 
-    This setting currently concerns token reuse only. If unset, the master
-    issues single-use tokens to minions, which can be quite expensive. You
-    can set ``ttl`` (configuring the explicit_max_ttl for tokens) and ``uses``
-    (configuring num_uses, the number of requests a single token is allowed to issue).
-    To make full use of multi-use tokens, you should configure a cache that
-    survives a single session.
+    See the `Vault token API docs <https://developer.hashicorp.com/vault/api-docs/auth/token#create-token>`_
+    for details. To make full use of multi-use tokens, you should configure a cache
+    that survives a single session.
+
+    .. note::
+
+        If unset, the master issues single-use tokens to minions, which can be quite expensive.
 
 
 allow_minion_override_params
@@ -593,7 +636,8 @@ namespace
 
 Minion configuration (optional):
 
-config_location
+``config_location``
+~~~~~~~~~~~~~~~~~~~
     Where to get the connection details for calling vault. By default,
     vault will try to determine if it needs to request the connection
     details from the master or from the local config. This optional option
@@ -602,7 +646,8 @@ config_location
 
   .. versionadded:: 3006.0
 
-issue_params
+``issue_params``
+~~~~~~~~~~~~~~~~
     Request overrides for token/AppRole issuance. This needs to be allowed
     on the master by setting ``issue:allow_minion_override_params`` to true.
     See the master configuration ``issue:token:params`` or ``issue:approle:params``
@@ -612,6 +657,10 @@ issue_params
 
         For token issuance, this used to be found in ``auth:ttl`` and ``auth:uses``.
 
+.. note::
+
+    ``auth:token_lifecycle`` and ``server:verify`` can be set on the minion as well.
+
 .. _vault-setup:
 """
 import logging
@@ -619,10 +668,16 @@ import logging
 import vaultutil as vault
 from salt.exceptions import CommandExecutionError, SaltException, SaltInvocationError
 
+try:
+    from salt.defaults import NOT_SET
+except ImportError:
+    NOT_SET = "__unset__"
+
+
 log = logging.getLogger(__name__)
 
 
-def read_secret(path, key=None, metadata=False, default="__unset__"):
+def read_secret(path, key=None, metadata=False, default=NOT_SET):
     """
     Return the value of <key> at <path> in vault, or entire secret.
 
@@ -669,7 +724,7 @@ def read_secret(path, key=None, metadata=False, default="__unset__"):
         When the path or path/key combination is not found, an exception will
         be raised, unless a default is provided here.
     """
-    if default == "__unset__":
+    if default == NOT_SET:
         default = CommandExecutionError
     if key is not None:
         metadata = False
@@ -879,7 +934,7 @@ def destroy_secret(path, *args):
         return False
 
 
-def list_secrets(path, default="__unset__", keys_only=False):
+def list_secrets(path, default=NOT_SET, keys_only=False):
     """
     List secret keys at <path>. The vault policy used must allow this.
     The path should end with a trailing slash.
@@ -924,7 +979,7 @@ def list_secrets(path, default="__unset__", keys_only=False):
         Setting this to True will only return the list of keys.
         For backwards-compatibility reasons, this defaults to False.
     """
-    if default == "__unset__":
+    if default == NOT_SET:
         default = CommandExecutionError
     log.debug("Listing vault secret keys for %s in %s", __grains__.get("id"), path)
     try:
