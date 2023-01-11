@@ -28,6 +28,7 @@ import time
 
 import vaultutil as vault
 from salt.exceptions import CommandExecutionError
+
 log = logging.getLogger(__name__)
 
 
@@ -51,7 +52,9 @@ class VaultEngine:
         if not isinstance(leases, list):
             leases = [leases]
         self.all = ".*" in leases or "*" in leases
-        self.lease_patterns = tuple(re.compile(ptrn) for ptrn in leases) if not self.all else []
+        self.lease_patterns = (
+            tuple(re.compile(ptrn) for ptrn in leases) if not self.all else []
+        )
         self.min_lease_validity = min_lease_validity
 
     def run(self):
@@ -67,7 +70,9 @@ class VaultEngine:
                     fail_ctr = 0
                 except CommandExecutionError as err:
                     if "No access to master" in str(err):
-                        log.warning("master_uri is not in opts, indicating no connection to master. Attempting reload")
+                        log.warning(
+                            "master_uri is not in opts, indicating no connection to master. Attempting reload"
+                        )
                         return
                     raise
             except Exception as err:  # pylint: disable=broad-except
@@ -75,8 +80,10 @@ class VaultEngine:
                 fail_ctr += 1
                 interval = self.interval
                 if fail_ctr <= 5:
-                    interval = interval/5
-                log.info(f"Last {fail_ctr} attempts failed. Reattempting renewal in {interval} seconds")
+                    interval = interval / 5
+                log.info(
+                    f"Last {fail_ctr} attempts failed. Reattempting renewal in {interval} seconds"
+                )
                 time.sleep(interval)
                 continue
 
@@ -101,6 +108,6 @@ class VaultEngine:
                     continue
 
                 if ret is None:
-                    log.warning(f"Monitored lease {lease} will run out (or does not exist)")
+                    log.warning(f"Monitored lease {lease} will run out")
 
             time.sleep(self.interval)
