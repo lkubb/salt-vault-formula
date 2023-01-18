@@ -25,7 +25,10 @@
       "subcomponent": "",
       "subcomponent_config": "",
       "git_username": "lkubb",
-      "_lookup": {},
+      "_lookup": {
+        "group": "vault",
+        "user": "vault"
+      },
       "_settings": {
         "version": null,
         "config": {},
@@ -43,7 +46,9 @@
           "roles_present": [],
           "roles_absent": [],
           "urls": []
-        }
+        },
+        "plugins": [],
+        "plugins_absent": []
       },
       "_template": "https://github.com/lkubb/salt-template-formula"
     }

@@ -12,6 +12,8 @@ vault:
     config: '/etc/vault.d/salt.json'
     service:
       name: vault
+    group: vault
+    user: vault
   config: {}
   disable_swap: false
   init:
@@ -26,6 +28,8 @@ vault:
     roles_absent: []
     roles_present: []
     urls: []
+  plugins: []
+  plugins_absent: []
   version: null
 
   tofs:

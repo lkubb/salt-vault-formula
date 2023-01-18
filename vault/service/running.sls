@@ -12,8 +12,9 @@ vault-service-running-service-running:
   service.running:
     - name: {{ vault.lookup.service.name }}
     - enable: True
-    # only reload configuration on changes, do not restart
-    # the latter would require unsealing again
+    # Only reload configuration on changes, do not restart.
+    # The latter would require unsealing again.
+    # Only a few values are reloaded though!
     - reload: true
     - watch:
       - sls: {{ sls_config_file }}

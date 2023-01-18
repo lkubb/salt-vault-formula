@@ -18,7 +18,13 @@ vault:
     roles_absent: []
     roles_present: []
     urls: []
+  plugins: []
+  plugins_absent: []
   version: null
+
+  lookup:
+    group: vault
+    user: vault
 
   tofs:
       # The files_switch key serves as a selector for alternative
