@@ -257,7 +257,7 @@ def write_connection(
         be checked.
     """
     endpoint = f"{mount}/config/{name}"
-    plugin_meta = PLUGINS.get(plugin, "default")
+    plugin_meta = PLUGINS.get(plugin, PLUGINS["default"])
     plugin_name = plugin_meta["name"] or plugin
     payload = {k: v for k, v in kwargs.items() if not k.startswith("_")}
 
