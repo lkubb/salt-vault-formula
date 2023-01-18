@@ -761,5 +761,5 @@ def get_plugin_name(plugin):
     plugin
         The name of the database plugin.
     """
-    plugin_name = PLUGINS.get(plugin, "default")["name"] or plugin
+    plugin_name = PLUGINS.get(plugin, {"name": plugin})["name"]
     return f"{plugin_name}-database-plugin"
