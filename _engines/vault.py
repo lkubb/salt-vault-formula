@@ -66,7 +66,12 @@ class VaultEngine:
             # Since requesting the lease store does that
             try:
                 try:
-                    lease_store = vault.get_lease_store(__opts__, __context__)
+                    # __context__ is explicitly not passed:
+                    # The context cache is designed for short processes like
+                    # a `state.apply`. Since this engine is a long-running process,
+                    # the context cache might/will get out of sync, but has priority,
+                    # possibly overwriting fresher data in other caches.
+                    lease_store = vault.get_lease_store(__opts__, {})
                     fail_ctr = 0
                 except CommandExecutionError as err:
                     if "No access to master" in str(err):
