@@ -7,6 +7,8 @@ vault:
     # Just for testing purposes
     winner: lookup
     added_in_lookup: lookup_value
+    pkg:
+      name: vault
     enablerepo:
       stable: true
     config: '/etc/vault.d/salt.json'

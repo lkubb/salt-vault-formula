@@ -8,6 +8,8 @@ values:
   lookup:
     arch: amd64
     rootgroup: root
+    pkg:
+      name: vault
     enablerepo:
       stable: true
     config: '/etc/vault.d/salt.json'
