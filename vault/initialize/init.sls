@@ -1,8 +1,14 @@
-# -*- coding: utf-8 -*-
 # vim: ft=sls
 
-{%- set tplroot = tpldir.split('/')[0] %}
-{%- set sls_service_running = tplroot ~ '.service.running' %}
+{#-
+    Ensures a running Vault cluster has been initialized.
+    Will output key shares and initial root token to file paths.
+    **Ensure you provide the correct GPG keys in order to encrypt
+    the output.**
+#}
+
+{%- set tplroot = tpldir.split("/")[0] %}
+{%- set sls_service_running = tplroot ~ ".service.running" %}
 {%- from tplroot ~ "/map.jinja" import mapdata as vault with context %}
 
 include:

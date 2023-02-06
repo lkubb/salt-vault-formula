@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 # vim: ft=sls
 
-{%- set tplroot = tpldir.split('/')[0] %}
+{%- set tplroot = tpldir.split("/")[0] %}
 {%- from tplroot ~ "/map.jinja" import mapdata as vault with context %}
 {%- from tplroot ~ "/libtofs.jinja" import files_switch with context %}
 
@@ -9,7 +8,7 @@ include:
   - {{ slsdotpath }}.repo
 
 vault-package-install-pkg-installed:
-  pkg.{{ "installed" if vault.version != "latest" else "latest"}}:
+  pkg.{{ "installed" if vault.version != "latest" else "latest" }}:
     - name: {{ vault.lookup.pkg.name }}
 {%- if vault.version and "latest" != vault.version %}
     - version: {{ vault.version }}
@@ -20,8 +19,8 @@ vault-package-install-pkg-installed:
 Vault service overrides are installed:
   file.managed:
     - name: /etc/systemd/system/vault.service.d/salt.conf
-    - source: {{ files_switch(['service_override.conf', 'service_override.conf.j2'],
-                              lookup='Vault service overrides are installed',
+    - source: {{ files_switch(["service_override.conf", "service_override.conf.j2"],
+                              lookup="Vault service overrides are installed",
                  )
               }}
     - mode: '0644'

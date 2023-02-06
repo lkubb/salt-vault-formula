@@ -1,6 +1,136 @@
-Available States
-================
+Available states
+----------------
 
 The following states are found in this formula:
+
+.. contents::
+   :local:
+
+
+``vault``
+^^^^^^^^^
+*Meta-state*.
+
+This installs the vault package,
+manages the vault configuration file
+and then starts the associated vault service.
+Also ensures the cluster is initialized.
+
+
+``vault.package``
+^^^^^^^^^^^^^^^^^
+Installs Vault (+ necessary service unit overrides) only.
+
+
+``vault.package.install``
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+
+``vault.package.repo``
+^^^^^^^^^^^^^^^^^^^^^^
+This state will install the configured vault repository.
+This works for apt/dnf/yum/zypper-based distributions only by default.
+
+
+``vault.config``
+^^^^^^^^^^^^^^^^
+Ensures the system and Vault is configured as specified.
+
+
+``vault.config.file``
+^^^^^^^^^^^^^^^^^^^^^
+Manages the Vault configuration.
+Has a dependency on `vault.package`_.
+
+
+``vault.config.system``
+^^^^^^^^^^^^^^^^^^^^^^^
+Manages system settings required for Vault: disable swap.
+Includes `vault.package`_.
+
+
+``vault.service``
+^^^^^^^^^^^^^^^^^
+Starts the vault service and enables it at boot time.
+Has a dependency on `vault.config`_.
+
+
+``vault.initialize``
+^^^^^^^^^^^^^^^^^^^^
+Ensures a running Vault cluster has been initialized.
+Will output key shares and initial root token to file paths.
+**Ensure you provide the correct GPG keys in order to encrypt
+the output.**
+
+
+``vault.pki``
+^^^^^^^^^^^^^
+
+
+
+``vault.pki.base``
+^^^^^^^^^^^^^^^^^^
+Manages PKI backend URL endpoints.
+
+
+``vault.pki.ca``
+^^^^^^^^^^^^^^^^
+Manages intermediate CAs on PKI backend mounts.
+
+
+``vault.pki.roles``
+^^^^^^^^^^^^^^^^^^^
+Manages present and absent roles on configured PKI mounts.
+
+
+``vault.plugins``
+^^^^^^^^^^^^^^^^^
+Manages present/absent custom plugins.
+For present ones, pulls binaries from a URI and registers them.
+
+
+``vault.clean``
+^^^^^^^^^^^^^^^
+*Meta-state*.
+
+Undoes everything performed in the ``vault`` meta-state
+in reverse order, i.e.
+stops the service,
+removes the configuration file and then
+uninstalls the package.
+
+
+``vault.package.clean``
+^^^^^^^^^^^^^^^^^^^^^^^
+Removes Vault and service unit overrides.
+Has a depency on `vault.config.clean`_.
+
+
+``vault.package.repo.clean``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+This state will remove the configured vault repository.
+This works for apt/dnf/yum/zypper-based distributions only by default.
+
+
+``vault.config.clean``
+^^^^^^^^^^^^^^^^^^^^^^
+Removes the Vault configuration only and has a
+dependency on `vault.service.clean`_.
+
+
+``vault.service.clean``
+^^^^^^^^^^^^^^^^^^^^^^^
+Stops the vault service and disables it at boot time.
+
+
+``vault.pki.clean``
+^^^^^^^^^^^^^^^^^^^
+Does nothing at the moment.
+
+
+``vault.plugins.clean``
+^^^^^^^^^^^^^^^^^^^^^^^
+
 
 

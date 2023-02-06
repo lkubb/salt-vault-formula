@@ -1,8 +1,12 @@
-# -*- coding: utf-8 -*-
 # vim: ft=sls
 
-{%- set tplroot = tpldir.split('/')[0] %}
-{%- set sls_config_clean = tplroot ~ '.config.clean' %}
+{#-
+    Removes Vault and service unit overrides.
+    Has a depency on `vault.config.clean`_.
+#}
+
+{%- set tplroot = tpldir.split("/")[0] %}
+{%- set sls_config_clean = tplroot ~ ".config.clean" %}
 {%- from tplroot ~ "/map.jinja" import mapdata as vault with context %}
 
 include:
@@ -13,7 +17,7 @@ Vault service overrides are absent:
   file.absent:
     - name: /etc/systemd/system/vault.service.d/salt.conf
 
-vault-package-clean-pkg-removed:
+Vault is removed:
   pkg.removed:
     - name: {{ vault.lookup.pkg.name }}
     - require:

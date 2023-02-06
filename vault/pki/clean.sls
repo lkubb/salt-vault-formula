@@ -1,5 +1,7 @@
-# -*- coding: utf-8 -*-
 # vim: ft=sls
 
-# does nothing atm
+{#
+    Does nothing at the moment.
+#}
+
 include: []

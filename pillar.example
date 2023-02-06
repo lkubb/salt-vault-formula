@@ -1,25 +1,52 @@
-# -*- coding: utf-8 -*-
 # vim: ft=yaml
 # yamllint disable rule:comments-indentation
 ---
 vault:
-
+    # Will be serialized as JSON
   config: {}
+    # Whether to ensure swap is disabled
   disable_swap: false
+    # Cluster initialization setting
   init:
+      # Number of generated key shares
     key_shares: 3
+      # Number of key shares required to unlock Vault
     key_threshold: 2
+      # Output the generated (encrypted) key shares and root token
+      # into this directory
     output: /root/vault_init
+      # List of GPG keys to use to encrypt the key shares.
+      # Should be the same number as `key_shares`
+      # (or a single one for "non-production")
     pgp_keys: []
+      # GPG key that will be used to encrypt the initial root token
     root_token_pgp_key: null
+      # HTTP(s) URI to connect to for cluster management
     vault_addr: null
+    # PKI backend management
   pki:
+      # List of intermediate CAs to generate. List items are kwargs
+      # to `vault_pki.intermediate_ca`.
     ca: []
+      # Roles that should be available on the mount.
+      # List items are kwargs to `vault_pki.role_present`.
     roles_absent: []
+      # Roles that should be absent from the mount.
+      # List items are kwargs to `vault_pki.role_absent`.
     roles_present: []
+      # List of parameters to `vault_pki.urls_set`
     urls: []
+    # List of plugins to pull and register. Example:
+  #   - name: influxdb2-database-plugin
+  #     source: salt://vault/files/plugins/influxdb2-database-plugin_linux_amd64
+  #     hash: cafebabe1337d00ddeadbeefcafebabe1337d00ddeadbeefcafebabe1337d00d
+  #     type: database
   plugins: []
+    # List of plugins to ensure are absent. Example:
+  #   - name: influxdb2-database-plugin
+  #     type: database
   plugins_absent: []
+    # `version` parameter for `pkg.installed`
   version: null
 
   lookup:
