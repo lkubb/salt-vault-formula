@@ -71,7 +71,7 @@ Vault {{ reponame }} repository is available:
         path: {{ config.file }}
 {%-     endif %}
     - require_in:
-      - vault-package-install-pkg-installed
+      - Vault is installed
 
 {%-   else %}
 
@@ -83,7 +83,7 @@ Vault {{ reponame }} repository is disabled:
 {%-       endif %}
 {%-     endfor %}
     - require_in:
-      - vault-package-install-pkg-installed
+      - Vault is installed
 
 {%-     if "apt" == vault.lookup.pkg_manager %}
 

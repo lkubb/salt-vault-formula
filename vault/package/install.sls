@@ -7,7 +7,7 @@
 include:
   - {{ slsdotpath }}.repo
 
-vault-package-install-pkg-installed:
+Vault is installed:
   pkg.{{ "installed" if vault.version != "latest" else "latest" }}:
     - name: {{ vault.lookup.pkg.name }}
 {%- if vault.version and "latest" != vault.version %}
@@ -29,7 +29,7 @@ Vault service overrides are installed:
     - makedirs: True
     - template: jinja
     - require:
-      - vault-package-install-pkg-installed
+      - Vault is installed
     - context:
         vault: {{ vault | json }}
 
