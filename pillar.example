@@ -38,9 +38,10 @@ vault:
     urls: []
     # List of plugins to pull and register. Example:
   #   - name: influxdb2-database-plugin
-  #     source: salt://vault/files/plugins/influxdb2-database-plugin_linux_amd64
+  #     source: salt://vault/files/plugins/influxdb2-database-plugin_0.0.2_linux_amd64
   #     hash: cafebabe1337d00ddeadbeefcafebabe1337d00ddeadbeefcafebabe1337d00d
   #     type: database
+  #     version: 0.0.2
   plugins: []
     # List of plugins to ensure are absent. Example:
   #   - name: influxdb2-database-plugin

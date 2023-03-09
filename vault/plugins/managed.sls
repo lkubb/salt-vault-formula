@@ -29,6 +29,7 @@ Vault plugin {{ plugin.name }} is registered:
     - sha256: {{ salt["file.get_source_sum"](source=plugin.source, source_hash=plugin.hash)["hsum"] }}
     - args: {{ plugin.get("args", "null") }}
     - env: {{ plugin.get("env", "null") }}
+    - version: {{ plugin.get("version", "null") }}
     - require:
       - Vault plugin {{ plugin.name }} is present
 {%- endfor %}

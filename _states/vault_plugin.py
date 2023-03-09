@@ -12,7 +12,7 @@ from salt.exceptions import CommandExecutionError, SaltInvocationError
 log = logging.getLogger(__name__)
 
 
-def registered(name, plugin_type, sha256, command=None, args=None, env=None):
+def registered(name, plugin_type, sha256, version=None, command=None, args=None, env=None):
     """
     Ensure a plugin is registered as specified.
 
@@ -24,6 +24,9 @@ def registered(name, plugin_type, sha256, command=None, args=None, env=None):
 
     sha256
         The sha256 hexdigest of the binary.
+
+    version
+        The plugin version. Will only be written on changes.
 
     command
         Specifies the command used to execute the plugin. This is relative to the plugin directory.
@@ -76,6 +79,7 @@ def registered(name, plugin_type, sha256, command=None, args=None, env=None):
             command=command,
             args=args,
             env=env,
+            version=version,
         )
         if current:
             ret["comment"] = "The plugin definition has been updated"
