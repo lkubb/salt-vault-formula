@@ -384,7 +384,7 @@ def expand_pattern_lists(pattern, **mappings):
     # very expensive, since patterns will typically involve a handful of lists at
     # most.
 
-    for (_, field_name, _, _) in f.parse(pattern):
+    for _, field_name, _, _ in f.parse(pattern):
         if field_name is None:
             continue
         (value, _) = f.get_field(field_name, None, mappings)
@@ -592,7 +592,11 @@ def _build_authd_client(opts, context, force_local=False):
             # Only fetch secret ID if there is no cached valid token
             if cached_token is None and secret_id is None:
                 secret_id = _fetch_secret_id(
-                    config, opts, secret_id_cache, unauthd_client, force_local=force_local
+                    config,
+                    opts,
+                    secret_id_cache,
+                    unauthd_client,
+                    force_local=force_local,
                 )
             if secret_id is None:
                 secret_id = InvalidVaultSecretId()
@@ -609,7 +613,9 @@ def _build_authd_client(opts, context, force_local=False):
             cache=secret_id_cache,
             token_store=token_auth,
         )
-        client = AuthenticatedVaultClient(auth, session=unauthd_client.session, **config["server"])
+        client = AuthenticatedVaultClient(
+            auth, session=unauthd_client.session, **config["server"]
+        )
     elif config["auth"]["method"] in ["token", "wrapped_token"]:
         token = _fetch_token(
             config,
@@ -620,7 +626,9 @@ def _build_authd_client(opts, context, force_local=False):
             embedded_token=embedded_token,
         )
         auth = VaultTokenAuth(token=token, cache=token_cache)
-        client = AuthenticatedVaultClient(auth, session=unauthd_client.session, **config["server"])
+        client = AuthenticatedVaultClient(
+            auth, session=unauthd_client.session, **config["server"]
+        )
 
     if client is not None:
         return client, config
@@ -686,11 +694,15 @@ def _use_local_config(opts):
     log.debug("Using Vault connection details from local config.")
     config = parse_config(opts.get("vault", {}))
     embedded_token = config["auth"].pop("token", None)
-    return {
-        "auth": config["auth"],
-        "cache": config["cache"],
-        "server": config["server"],
-    }, embedded_token, VaultClient(**config["server"])
+    return (
+        {
+            "auth": config["auth"],
+            "cache": config["cache"],
+            "server": config["server"],
+        },
+        embedded_token,
+        VaultClient(**config["server"]),
+    )
 
 
 def _fetch_secret_id(config, opts, secret_id_cache, unwrap_client, force_local=False):
@@ -748,7 +760,9 @@ def _fetch_secret_id(config, opts, secret_id_cache, unwrap_client, force_local=F
     return cache_or_fetch(config, opts, secret_id_cache, unwrap_client)
 
 
-def _fetch_token(config, opts, token_cache, unwrap_client, force_local=False, embedded_token=None):
+def _fetch_token(
+    config, opts, token_cache, unwrap_client, force_local=False, embedded_token=None
+):
     def cache_or_fetch(config, opts, token_cache, unwrap_client, embedded_token):
         token = token_cache.get(10)
         if token is not None:

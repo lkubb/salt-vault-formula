@@ -12,7 +12,9 @@ from salt.exceptions import CommandExecutionError, SaltInvocationError
 log = logging.getLogger(__name__)
 
 
-def registered(name, plugin_type, sha256, version=None, command=None, args=None, env=None):
+def registered(
+    name, plugin_type, sha256, version=None, command=None, args=None, env=None
+):
     """
     Ensure a plugin is registered as specified.
 
