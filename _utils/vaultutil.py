@@ -10,6 +10,7 @@ documented in the :ref:`execution module docs <vault-setup>`.
 import base64
 import copy
 import datetime
+import fnmatch
 import logging
 import re
 import string
@@ -2781,6 +2782,8 @@ class LeaseStore:
     def __init__(self, client, cache):
         self.client = client
         self.cache = cache
+        # to remove revoked leases from cache, we need a mapping id => ckey
+        self.lease_id_ckey_cache = {}
 
     def get(
         self,
@@ -2854,6 +2857,8 @@ class LeaseStore:
         # Since we can renew leases, do not check for future validity in cache
         lease = self.cache.get(ckey, flush=flush)
         if lease is None or lease.is_valid(valid_for):
+            if lease is not None:
+                self.lease_id_ckey_cache[str(lease)] = ckey
             return lease
         if not renew:
             return check_flush()
@@ -2869,6 +2874,7 @@ class LeaseStore:
                 return check_flush()
         # Ensure the new validity is cached
         self.cache.store(ckey, lease)
+        self.lease_id_ckey_cache[str(lease)] = ckey
         return lease
 
     def list(self):
@@ -2909,7 +2915,8 @@ class LeaseStore:
 
     def revoke(self, lease, sync=False):
         """
-        Revoke a lease.
+        Revoke a lease. Will also remove the cached lease,
+        if it has been requested from this LeaseStore before.
 
         lease
             A lease ID or VaultLease object to revoke.
@@ -2917,9 +2924,36 @@ class LeaseStore:
         sync
             Only return once the lease has been revoked. Defaults to false.
         """
-        endpoint = "sys/leases/renew"
+        endpoint = "sys/leases/revoke"
         payload = {"lease_id": str(lease), "sync": sync}
-        return self.client.post(endpoint, payload)
+        try:
+            self.client.post(endpoint, payload)
+        except VaultNotFoundError:
+            pass
+        if str(lease) in self.lease_id_ckey_cache:
+            self.cache.flush(self.lease_id_ckey_cache.pop(str(lease)))
+        return True
+
+    def revoke_all(self, match="*", sync=False):
+        """
+        Ensure all cached leases are revoked.
+
+        match
+            Only revoke cached leases whose ckey matches this glob pattern.
+            Defaults to ``*``.
+
+        sync
+            Wait for revocation success of all leases. Defaults to false.
+        """
+        for ckey in self.list():
+            if not fnmatch.fnmatch(ckey, match):
+                continue
+            lease = self.cache.get(ckey, flush=True, renew=False)
+            if lease is None:
+                continue
+            self.lease_id_ckey_cache[str(lease)] = ckey
+            self.revoke(lease, sync=sync)
+        return True
 
     def store(self, ckey, lease):
         """
@@ -2931,7 +2965,9 @@ class LeaseStore:
         lease
             A lease ID or VaultLease object to store.
         """
-        return self.cache.store(ckey, lease)
+        self.cache.store(ckey, lease)
+        self.lease_id_ckey_cache[str(lease)] = ckey
+        return True
 
 
 ####################################################################################

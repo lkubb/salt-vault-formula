@@ -722,6 +722,39 @@ def get_creds(name, static=False, cache=True, valid_for=0, mount="database"):
     return lease.data
 
 
+def clear_cached(name=None, mount=None, cache=None, static=None):
+    """
+    Revoke and clear cached database credentials matching specified parameters.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+            salt '*' vault_db.clear_cached name=myrole mount=database
+            salt '*' vault_db.clear_cached mount=database
+            salt '*' vault_db.clear_cached
+
+    name
+        Only clear credentials using this role name.
+
+    mount
+        Only clear credentials from this mount.
+
+    cache
+        Only clear credentials using this cache name (refer to get_creds for details).
+
+    static
+        Only clear static (``True``) or dynamic (``False``) credentials.
+    """
+    creds_cache = vault.get_lease_store(__opts__, __context__)
+    ptrn = ["db"]
+    ptrn += "*" if mount is None else mount
+    ptrn += "*" if static is None else "static" if static else "dynamic"
+    ptrn += "*" if name is None else name
+    ptrn += "*" if cache is None else "default" if cache is True else cache
+    return creds_cache.revoke_all(match=".".join(ptrn))
+
+
 def rotate_static_role(name, mount="database"):
     """
     Rotate Static Role credentials stored for a given role name.
