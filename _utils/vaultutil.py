@@ -2948,9 +2948,9 @@ class LeaseStore:
             self.cache.flush(self.lease_id_ckey_cache.pop(str(lease)))
         return True
 
-    def revoke_all(self, match="*", sync=False):
+    def revoke_all(self, match="*", sync=False, enforce_revocation=False):
         """
-        Ensure all cached leases are revoked.
+        Revoke all cached leases.
 
         match
             Only revoke cached leases whose ckey matches this glob pattern.
@@ -2958,15 +2958,26 @@ class LeaseStore:
 
         sync
             Wait for revocation success of all leases. Defaults to false.
+
+        enforce_revocation
+            Raise an exception if a revocation is denied on the grounds of
+            missing permissions. The default policy does not include the
+            necessary permissions, hence this switch. Defaults to false.
         """
         for ckey in self.list():
             if not fnmatch.fnmatch(ckey, match):
                 continue
-            lease = self.cache.get(ckey, flush=True, renew=False)
+            lease = self.cache.get(ckey, flush=True)
             if lease is None:
                 continue
             self.lease_id_ckey_cache[str(lease)] = ckey
-            self.revoke(lease, sync=sync)
+            try:
+                self.revoke(lease, sync=sync)
+            except VaultPermissionDeniedError:
+                if enforce_revocation:
+                    raise
+                # Forget the lease and let Vault's automatic revocation handle it
+                self.cache.flush(ckey)
         return True
 
     def store(self, ckey, lease):
