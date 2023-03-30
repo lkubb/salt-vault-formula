@@ -10,4 +10,4 @@
 Vault is dead:
   service.dead:
     - name: {{ vault.lookup.service.name }}
-    - enable: False
+    - enable: false

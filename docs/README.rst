@@ -63,9 +63,9 @@ The following states are found in this formula:
 ^^^^^^^^^
 *Meta-state*.
 
-This installs the vault package,
-manages the vault configuration file
-and then starts the associated vault service.
+This installs Vault,
+manages the Vault and system swap configuration
+and then starts the Vault service.
 Also ensures the cluster is initialized.
 
 

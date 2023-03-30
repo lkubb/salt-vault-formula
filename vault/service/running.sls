@@ -10,7 +10,7 @@ include:
 Vault is running:
   service.running:
     - name: {{ vault.lookup.service.name }}
-    - enable: True
+    - enable: true
     # Only reload configuration on changes, do not restart.
     # The latter would require unsealing again.
     # Only a few values are reloaded though!
