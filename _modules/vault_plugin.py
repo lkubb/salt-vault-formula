@@ -248,6 +248,54 @@ def deregister(plugin_type, plugin_name, version=None):
         raise CommandExecutionError("{}: {}".format(type(err).__name__, err)) from err
 
 
+def reload(plugin_name=None, mounts=None, globally=False):
+    """
+    Reload mounted plugin backends.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' vault_plugin.reload elasticsearch-database-plugin
+        salt '*' vault_plugin.reload mounts='[database]'
+
+    Required policy:
+
+    .. code-block:: vaultpolicy
+
+        path "sys/plugins/reload/backend" {
+            capabilities = ["update"]
+        }
+
+    plugin_name
+        The name of the plugin to reload, as registered in the plugin catalog.
+
+    mounts
+        List of mount paths of the plugin backends to reload.
+
+    globally
+        By default, this reloads the plugin or mounts on this Vault instance.
+        If true, will begin reloading the plugin on all instances of a cluster.
+    """
+    if not (plugin_name or mounts):
+        raise SaltInvocationError("Either plugin_name or mounts is required")
+    endpoint = "sys/plugins/reload/backend"
+    payload = {}
+    if plugin_name:
+        payload["plugin"] = plugin_name
+    if mounts:
+        if not isinstance(mounts, list):
+            mounts = [mounts]
+        payload["mounts"] = mounts
+    if globally:
+        payload["scope"] = "global"
+    try:
+        vault.query("POST", endpoint, __opts__, __context__, payload=payload)
+        return True
+    except SaltException as err:
+        raise CommandExecutionError("{}: {}".format(type(err).__name__, err)) from err
+
+
 def _check_type(plugin_type):
     if plugin_type not in ["auth", "database", "secret"]:
         raise SaltInvocationError(f"Invalid plugin type: {plugin_type}")
