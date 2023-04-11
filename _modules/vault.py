@@ -672,7 +672,9 @@ Minion configuration (optional):
 .. _vault-setup:
 """
 import logging
+from pathlib import Path
 
+import salt.utils.files
 import vaultutil as vault
 from salt.exceptions import CommandExecutionError, SaltException, SaltInvocationError
 
@@ -1159,6 +1161,49 @@ def policies_list():
         raise CommandExecutionError("{}: {}".format(type(err).__name__, err)) from err
 
 
+def snapshot(path, backup=False):
+    """
+    Create a snapshot of the Raft cluster.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' vault.snapshot /backup/vault.bak
+
+    Required policy:
+
+    .. code-block:: vaultpolicy
+
+        path "sys/storage/raft/snapshot" {
+            capabilities = ["read"]
+        }
+
+    path
+        The path to save the snapshot to.
+
+    backup
+        See file.managed backup parameter. Defaults to False (no backup).
+    """
+    try:
+        path = Path(path)
+        if not path.is_absolute():
+            raise SaltInvocationError("This operation requires an absolute path")
+        res = vault.query_raw("GET", "sys/storage/raft/snapshot", __opts__, __context__)
+        if not res.ok:
+            raise CommandExecutionError(
+                f"Error requesting Raft snapshot: HTTP {res.status_code}: {res.reason}"
+            )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(mode=0o600)
+        path.chmod(0o600)
+        _safe_atomic_write(path, res.content, backup)
+        return True
+
+    except SaltException as err:
+        raise CommandExecutionError("{}: {}".format(type(err).__name__, err)) from err
+
+
 def query(method, endpoint, payload=None):
     """
     .. versionadded:: 3007.0
@@ -1192,3 +1237,17 @@ def query(method, endpoint, payload=None):
         return vault.query(method, endpoint, __opts__, __context__, payload=payload)
     except SaltException as err:
         raise CommandExecutionError("{}: {}".format(type(err).__name__, err)) from err
+
+
+def _safe_atomic_write(dst, data, backup):
+    """
+    Create a temporary file with only user r/w perms and atomically
+    copy it to the destination, honoring ``backup``.
+    """
+    tmp = salt.utils.files.mkstemp(prefix=salt.utils.files.TEMPFILE_PREFIX)
+    with salt.utils.files.fopen(tmp, "wb") as tmp_:
+        tmp_.write(data)
+    salt.utils.files.copyfile(
+        tmp, dst, __salt__["config.backup_mode"](backup), __opts__["cachedir"]
+    )
+    salt.utils.files.safe_rm(tmp)
