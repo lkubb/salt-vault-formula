@@ -37,6 +37,16 @@ The above URI is analogous to running the following vault command:
 .. code-block:: bash
 
     $ vault read -field=mypassword secret/passwords
+
+Further configuration
+---------------------
+The following options can be set in the profile:
+
+patch
+    When writing data, partially update the secret instead of overwriting it completely.
+    This is usually the expected behavior, since without this option,
+    each secret path can only contain a single mapping key safely.
+    Defaults to ``False`` for backwards-compatibility reasons.
 """
 
 
@@ -59,6 +69,25 @@ def set_(key, value, profile=None):
     else:
         path, key = key.rsplit("/", 1)
     data = {key: value}
+    curr_data = {}
+    profile = profile or {}
+
+    if profile.get("patch"):
+        try:
+            # Patching only works on existing secrets and requires the `patch`
+            # capability as well as KV v2. Save the current data if patching is enabled
+            # to write it back later, if any errors happen in patch_kv.
+            # This also checks that the path exists, otherwise patching fails as well.
+            # TODO: Include some of the workarounds in the patch method
+            curr_data = vault.read_kv(path, __opts__, __context__)
+            vault.patch_kv(path, data, __opts__, __context__)
+            return True
+        except (vault.VaultNotFoundError, vault.VaultPermissionDeniedError):
+            pass
+        except vault.VaultInvocationError as err:
+            if "requires kv-v2" not in str(err):
+                raise
+    curr_data.update(data)
 
     try:
         vault.write_kv(path, data, __opts__, __context__)
