@@ -42,6 +42,7 @@ logging.getLogger("requests").setLevel(logging.WARNING)
 __salt__ = {}
 
 TOKEN_CKEY = "__token"
+CLIENT_CKEY = "_vault_authd_client"
 
 
 def query(
@@ -313,6 +314,8 @@ def clear_cache(opts, context, ckey=None, connection=True, session=False):
     """
     Clears connection cache.
     """
+    # Ensure the active client gets recreated after clearing the cache
+    context.pop(CLIENT_CKEY, None)
     cbank = _get_cache_bank(
         opts, connection=connection, session=session and not connection
     )
@@ -486,19 +489,18 @@ def get_authd_client(opts, context, force_local=False, get_config=False):
     Returns an AuthenticatedVaultClient that is valid for at least one query.
     """
     cbank = _get_cache_bank(opts, force_local=force_local)
-    ckey = "_vault_authd_client"
     retry = False
     client = config = None
 
     # First, check if an already initialized instance is available
     # and still valid
-    if cbank in context and ckey in context[cbank]:
+    if cbank in context and CLIENT_CKEY in context[cbank]:
         log.debug("Fetching client instance and config from context")
-        client, config = context[cbank][ckey]
+        client, config = context[cbank][CLIENT_CKEY]
         if not client.token_valid():
             log.debug("Cached client instance was invalid")
             client = config = None
-            context[cbank].pop(ckey)
+            context[cbank].pop(CLIENT_CKEY)
 
     # Otherwise, try to build one from possibly cached data
     if client is None or config is None:
@@ -547,7 +549,7 @@ def get_authd_client(opts, context, force_local=False, get_config=False):
 
     if cbank not in context:
         context[cbank] = {}
-    context[cbank][ckey] = (client, config)
+    context[cbank][CLIENT_CKEY] = (client, config)
 
     if get_config:
         return client, config
@@ -817,8 +819,7 @@ def _fetch_token(
             token = token_cache.get()
             if token is None or embedded_token != str(token):
                 # lookup and verify raw token
-                client = VaultClient(**config["server"])
-                token_info = client.token_lookup(embedded_token, raw=True)
+                token_info = unwrap_client.token_lookup(embedded_token, raw=True)
                 if token_info.status_code != 200:
                     raise VaultException(
                         "Configured token cannot be verified. It is most likely expired or invalid."
