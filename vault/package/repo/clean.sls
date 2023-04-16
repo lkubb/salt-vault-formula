@@ -20,13 +20,6 @@ include:
 {%-   for reponame, enabled in vault.lookup.enablerepo.items() %}
 {%-     if enabled %}
 
-{%-       if 'apt' == vault.lookup.pkg_manager %}
-
-Vault {{ reponame }} signing key is absent:
-  file.absent:
-    - name: {{ vault.lookup.repos[reponame].keyring.file }}
-{%-       endif %}
-
 Vault {{ reponame }} repository is absent:
   pkgrepo.absent:
 {%-       for conf in ["name", "ppa", "ppa_auth", "keyid", "keyid_ppa", "copr"] %}

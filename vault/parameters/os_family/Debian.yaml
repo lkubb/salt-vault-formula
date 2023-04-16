@@ -21,9 +21,5 @@ values:
           https://apt.releases.hashicorp.com {{ grains.lsb_distrib_codename }} main
         key_url: https://apt.releases.hashicorp.com/gpg
         file: /etc/apt/sources.list.d/hashicorp.list
-        keyring:
-          file: /usr/share/keyrings/hashicorp-archive-keyring.gpg
-          fingerprint: 798AEC654E5C15428C8E42EEAA16FCBCA621E701
-          source: https://apt.releases.hashicorp.com/gpg
-          source_hash: false
+        aptkey: false
 ...
