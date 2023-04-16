@@ -74,11 +74,6 @@ Also ensures the cluster is initialized.
 Installs Vault (+ necessary service unit overrides) only.
 
 
-``vault.package.install``
-^^^^^^^^^^^^^^^^^^^^^^^^^
-
-
-
 ``vault.package.repo``
 ^^^^^^^^^^^^^^^^^^^^^^
 This state will install the configured vault repository.
