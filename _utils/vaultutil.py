@@ -310,20 +310,52 @@ def get_lease_store(opts, context):
     return LeaseStore(client, lease_cache)
 
 
-def clear_cache(opts, context, ckey=None, connection=True, session=False):
+def clear_cache(opts, context, ckey=None, connection=True, session=False, force_local=False):
     """
-    Clears connection cache.
+    Clears the Vault cache.
+    It is organized in a hierarchy: ``/vault/connection/session``
+    The master keeps a separate copy of the above per minion
+    in ``minions/<minion_id>``.
+
+    opts
+        Pass ``__opts__``.
+
+    context
+        Pass ``__context__``.
+
+    ckey
+        Only clear this cache key instead of the whole cache bank.
+
+    connection
+        Only clear the cached data scoped to a connection. This includes
+        configuration, auth credentials and leases. Defaults to true.
+
+    session
+        Only clear the cached data scoped to a session. This only includes
+        leases, not configuration/auth credentials. Defaults to false.
+        Setting this to true will keep the connection cache, regardless
+        of ``connection``.
+
+    force_local
+        Required on the master when the runner is issuing credentials during
+        pillar compilation. Instructs the cache to use the ``/vault`` cache bank,
+        regardless of determined run type. Defaults to false and should not
+        be set by anything other than the runner.
     """
     # Ensure the active client gets recreated after clearing the cache
     context.pop(CLIENT_CKEY, None)
     cbank = _get_cache_bank(
-        opts, connection=connection, session=session and not connection
+        opts, connection=connection, session=session, force_local=force_local
     )
     if cbank in context:
         if ckey is None:
             context.pop(cbank)
         else:
             context[cbank].pop(ckey, None)
+            if connection and not session:
+                # Ensure the active client gets recreated after altering the connection cache
+                context[cbank].pop(CLIENT_CKEY, None)
+
     # also remove sub-banks from context to mimic cache behavior
     if ckey is None:
         for bank in list(context):
@@ -332,6 +364,8 @@ def clear_cache(opts, context, ckey=None, connection=True, session=False):
     cache = salt.cache.factory(opts)
     if cache.contains(cbank, ckey):
         return cache.flush(cbank, ckey)
+
+    # In case the cache driver was overridden for the Vault integration
     local_opts = copy.copy(opts)
     opts["cache"] = "localfs"
     cache = salt.cache.factory(local_opts)
@@ -532,7 +566,7 @@ def get_authd_client(opts, context, force_local=False, get_config=False):
         config["auth"]["token_lifecycle"]["minimum_ttl"] or 0, remote=False
     ):
         log.debug("Deleting cache and requesting new authentication credentials")
-        clear_cache(opts, context)
+        clear_cache(opts, context, force_local=force_local)
         client, config = _build_authd_client(opts, context, force_local=force_local)
         if not client.token_valid(
             config["auth"]["token_lifecycle"]["minimum_ttl"] or 0, remote=False
@@ -842,14 +876,12 @@ def _fetch_token(
 def _query_master(
     func,
     opts,
-    expected_server=None,
     unwrap_client=None,
     unwrap_expected_creation_path=None,
     **kwargs,
 ):
     def check_result(
         result,
-        expected_server=None,
         unwrap_client=None,
         unwrap_expected_creation_path=None,
     ):
@@ -880,6 +912,7 @@ def _query_master(
             raise salt.exceptions.CommandExecutionError(result)
 
         config_expired = False
+        expected_server = None
 
         if result.get("expire_cache", False):
             log.info("Master requested Vault config expiration.")
@@ -893,6 +926,9 @@ def _query_master(
             ]
             result.update({"server": reported_server})
 
+        if unwrap_client is not None:
+            expected_server = unwrap_client.get_config()
+
         if expected_server is not None and result.get("server") != expected_server:
             log.info(
                 "Mismatch of cached and reported server data detected. Invalidating cache."
@@ -900,19 +936,13 @@ def _query_master(
             # make sure to fetch wrapped data anyways for security reasons
             config_expired = True
             unwrap_expected_creation_path = None
+            unwrap_client = None
 
         # This is used to augment some vault responses with data fetched by the master
         # e.g. secret_id_num_uses
         misc_data = result.get("misc_data", {})
 
         if result.get("wrap_info") or result.get("wrap_info_nested"):
-            if unwrap_client is not None and unwrap_client.get_config() != result.get(
-                "server"
-            ):
-                unwrap_client = None
-                # Ensure to fetch wrapped data anyways for security reasons
-                config_expired = True
-
             if unwrap_client is None:
                 unwrap_client = VaultClient(**result["server"])
 
@@ -1005,7 +1035,6 @@ def _query_master(
         )
     return check_result(
         result,
-        expected_server=expected_server,
         unwrap_client=unwrap_client,
         unwrap_expected_creation_path=unwrap_expected_creation_path,
     )
@@ -2610,17 +2639,48 @@ class VaultKV:
 
     def patch(self, path, data):
         """
-        Patch existing data. Requires kv-v2.
-        This uses JSON Merge Patch format, see
+        Patch existing data.
+        Tries to use a PATCH request, otherwise falls back to updating in memory
+        and writing back the whole secret, thus might consume more than one token use.
+
+        Since this uses JSON Merge Patch format, values set to ``null`` (``None``)
+        will be dropped. For details, see
         https://datatracker.ietf.org/doc/html/draft-ietf-appsawg-json-merge-patch-07
         """
+        def apply_json_merge_patch(data, patch):
+            if not patch:
+                return data
+            if not isinstance(data, dict) or not isinstance(patch, dict):
+                raise ValueError("Data and patch must be dictionaries.")
+
+            for key, value in patch.items():
+                if value is None:
+                    data.pop(key, None)
+                elif isinstance(value, dict):
+                    data[key] = apply_json_merge_patch(data.get(key, {}), value)
+                else:
+                    data[key] = value
+            return data
+
+        def patch_in_memory(path, data):
+            current = self.read(path)
+            updated = apply_json_merge_patch(current, data)
+            return self.write(path, updated)
+
         v2_info = self.is_v2(path)
         if not v2_info["v2"]:
-            raise VaultInvocationError("Patch operation requires kv-v2.")
+            return patch_in_memory(path, data)
+
         path = v2_info["data"]
-        data = {"data": data}
+        payload = {"data": data}
         add_headers = {"Content-Type": "application/merge-patch+json"}
-        return self.client.patch(path, payload=data, add_headers=add_headers)
+        try:
+            return self.client.patch(path, payload=payload, add_headers=add_headers)
+        except VaultPermissionDeniedError:
+            log.warning("Failed patching secret, is the `patch` capability set?")
+        except VaultUnsupportedOperationError:
+            pass
+        return patch_in_memory(path, data)
 
     def delete(self, path, versions=None):
         """
