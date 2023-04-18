@@ -723,12 +723,13 @@ def get_creds(name, static=False, cache=True, valid_for=0, mount="database"):
 
 
 def clear_cached(
-    name=None, mount=None, cache=None, static=None, enforce_revocation=False
+    name=None, mount=None, cache=None, static=None, allow_validity_reduction=True
 ):
     """
     Clear cached database credentials matching specified parameters.
     Tries to revoke the leases, which requires ``update`` permissions
-    on ``sys/leases/revoke`` (not included in default policy).
+    on ``sys/leases/revoke`` (not included in default policy),
+    otherwise reduces the validity period to 1 second by default.
 
     CLI Example:
 
@@ -750,9 +751,10 @@ def clear_cached(
     static
         Only clear static (``True``) or dynamic (``False``) credentials.
 
-    enforce_revocation
-        Raise an exception if a revocation is denied on the grounds of
-        missing permissions. Defaults to false.
+    allow_validity_reduction
+        If a revocation is denied on the grounds of missing permissions,
+        instead reduce the lease validity to 1 second.
+        Defaults to true.
     """
     creds_cache = vault.get_lease_store(__opts__, __context__)
     ptrn = ["db"]
@@ -760,7 +762,9 @@ def clear_cached(
     ptrn.append("*" if static is None else "static" if static else "dynamic")
     ptrn.append("*" if name is None else name)
     ptrn.append("*" if cache is None else "default" if cache is True else cache)
-    return creds_cache.revoke_all(match=".".join(ptrn), enforce_revocation=enforce_revocation)
+    return creds_cache.revoke_cached(
+        match=".".join(ptrn), allow_validity_reduction=allow_validity_reduction
+    )
 
 
 def rotate_static_role(name, mount="database"):

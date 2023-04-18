@@ -106,7 +106,7 @@ class VaultEngine:
                 # if it does not fulfill the minimum validity though.
                 try:
                     ret = lease_store.get(
-                        lease, valid_for=self.min_lease_validity, flush=False
+                        lease, valid_for=self.min_lease_validity, revoke=False
                     )
                 except Exception as err:  # pylint: disable=broad-except
                     log.error(f"Failed requesting/renewing lease {lease}: {err}")
