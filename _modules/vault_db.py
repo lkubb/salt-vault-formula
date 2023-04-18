@@ -767,6 +767,45 @@ def clear_cached(
     )
 
 
+def renew_cached(name=None, mount=None, cache=None, static=None, increment=None):
+    """
+    Renew cached database credentials matching specified parameters.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+            salt '*' vault_db.renew_cached name=myrole mount=database
+            salt '*' vault_db.renew_cached mount=database
+            salt '*' vault_db.renew_cached
+
+    name
+        Only renew credentials using this role name.
+
+    mount
+        Only renew credentials from this mount.
+
+    cache
+        Only renew credentials using this cache name (refer to get_creds for details).
+
+    static
+        Only renew static (``True``) or dynamic (``False``) credentials.
+
+    increment
+        Request the leases to be valid for this amount of time from the current
+        point of time onwards. Can also be used to reduce the validity period.
+        The server might not honor this increment.
+        Can be an integer (seconds) or a time string like ``1h``. Optional.
+    """
+    creds_cache = vault.get_lease_store(__opts__, __context__)
+    ptrn = ["db"]
+    ptrn.append("*" if mount is None else mount)
+    ptrn.append("*" if static is None else "static" if static else "dynamic")
+    ptrn.append("*" if name is None else name)
+    ptrn.append("*" if cache is None else "default" if cache is True else cache)
+    return creds_cache.renew_cached(match=".".join(ptrn), increment=increment)
+
+
 def rotate_static_role(name, mount="database"):
     """
     Rotate Static Role credentials stored for a given role name.
