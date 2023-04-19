@@ -23,9 +23,11 @@ import salt.crypt
 import salt.exceptions
 import salt.utils.data
 import salt.utils.dictupdate
+import salt.utils.event
 import salt.utils.json
 import salt.utils.versions
 
+from requests.exceptions import ConnectionError
 from salt.exceptions import SaltInvocationError
 
 try:
@@ -88,9 +90,9 @@ def query(
         does not deduct a token use. Only relevant for endpoints not found
         in ``sys``. Defaults to False.
     """
-    vault = get_authd_client(opts, context)
+    client, config = get_authd_client(opts, context, get_config=True)
     try:
-        return vault.request(
+        return client.request(
             method,
             endpoint,
             payload=payload,
@@ -100,18 +102,21 @@ def query(
             **kwargs,
         )
     except VaultPermissionDeniedError:
-        # in case cached authentication data was revoked
-        clear_cache(opts, context)
-        vault = get_authd_client(opts, context)
-        return vault.request(
-            method,
-            endpoint,
-            payload=payload,
-            wrap=wrap,
-            raise_error=raise_error,
-            is_unauthd=is_unauthd,
-            **kwargs,
-        )
+        if not _check_clear(config, client):
+            raise
+
+    # in case policies have changed
+    clear_cache(opts, context)
+    client = get_authd_client(opts, context)
+    return client.request(
+        method,
+        endpoint,
+        payload=payload,
+        wrap=wrap,
+        raise_error=raise_error,
+        is_unauthd=is_unauthd,
+        **kwargs,
+    )
 
 
 def query_raw(
@@ -158,8 +163,8 @@ def query_raw(
         does not deduct a token use. Only relevant for endpoints not found
         in ``sys``. Defaults to False.
     """
-    vault = get_authd_client(opts, context)
-    res = vault.request_raw(
+    client, config = get_authd_client(opts, context, get_config=True)
+    res = client.request_raw(
         method, endpoint, payload=payload, wrap=wrap, is_unauthd=is_unauthd, **kwargs
     )
 
@@ -167,10 +172,13 @@ def query_raw(
         return res
 
     if res.status_code == 403:
-        # in case cached authentication data was revoked
+        if not _check_clear(config, client):
+            return res
+
+        # in case policies have changed
         clear_cache(opts, context)
-        vault = get_authd_client(opts, context)
-        res = vault.request_raw(
+        client = get_authd_client(opts, context)
+        res = client.request_raw(
             method,
             endpoint,
             payload=payload,
@@ -185,7 +193,6 @@ def is_v2(path, opts=None, context=None):
     """
     Determines if a given secret path is kv version 1 or 2.
     """
-    # TODO: consider if at least context is really necessary to require
     if opts is None or context is None:
         opts = globals().get("__opts__", {}) if opts is None else opts
         context = globals().get("__context__", {}) if context is None else context
@@ -195,7 +202,7 @@ def is_v2(path, opts=None, context=None):
             "cause context/opts dunders to be unavailable in utility modules. "
             "Please pass opts and context from importing Salt modules explicitly.",
         )
-    kv = _get_kv(opts, context)
+    kv = get_kv(opts, context)
     return kv.is_v2(path)
 
 
@@ -203,40 +210,56 @@ def read_kv(path, opts, context, include_metadata=False):
     """
     Read secret at <path>.
     """
-    kv = _get_kv(opts, context)
+    kv, config = get_kv(opts, context, get_config=True)
     try:
         return kv.read(path, include_metadata=include_metadata)
     except VaultPermissionDeniedError:
-        # in case cached authentication data was revoked
-        clear_cache(opts, context)
-        kv = _get_kv(opts, context)
-        return kv.read(path, include_metadata=include_metadata)
+        if not _check_clear(config, kv.client):
+            raise
+
+    # in case policies have changed
+    clear_cache(opts, context)
+    kv = get_kv(opts, context)
+    return kv.read(path, include_metadata=include_metadata)
 
 
 def write_kv(path, data, opts, context):
     """
     Write secret <data> to <path>.
     """
-    kv = _get_kv(opts, context)
+    kv, config = get_kv(opts, context, get_config=True)
     try:
         return kv.write(path, data)
     except VaultPermissionDeniedError:
-        clear_cache(opts, context)
-        kv = _get_kv(opts, context)
-        return kv.write(path, data)
+        if not _check_clear(config, kv.client):
+            raise
+
+    # in case policies have changed
+    clear_cache(opts, context)
+    kv = get_kv(opts, context)
+    return kv.write(path, data)
 
 
 def patch_kv(path, data, opts, context):
     """
     Patch secret <data> at <path>.
     """
-    kv = _get_kv(opts, context)
+    kv, config = get_kv(opts, context, get_config=True)
     try:
         return kv.patch(path, data)
-    except VaultPermissionDeniedError:
-        clear_cache(opts, context)
-        kv = _get_kv(opts, context)
+    except VaultAuthExpired:
+        # patching can consume several token uses when
+        # 1) `patch` cap unvailable 2) KV v1 3) KV v2 w/ old Vault versions
+        kv = get_kv(opts, context)
         return kv.patch(path, data)
+    except VaultPermissionDeniedError:
+        if not _check_clear(config, kv.client):
+            raise
+
+    # in case policies have changed
+    clear_cache(opts, context)
+    kv = get_kv(opts, context)
+    return kv.patch(path, data)
 
 
 def delete_kv(path, opts, context, versions=None):
@@ -244,26 +267,34 @@ def delete_kv(path, opts, context, versions=None):
     Delete secret at <path>. For KV v2, versions can be specified,
     which will be soft-deleted.
     """
-    kv = _get_kv(opts, context)
+    kv, config = get_kv(opts, context, get_config=True)
     try:
         return kv.delete(path, versions=versions)
     except VaultPermissionDeniedError:
-        clear_cache(opts, context)
-        kv = _get_kv(opts, context)
-        return kv.delete(path, versions=versions)
+        if not _check_clear(config, kv.client):
+            raise
+
+    # in case policies have changed
+    clear_cache(opts, context)
+    kv = get_kv(opts, context)
+    return kv.delete(path, versions=versions)
 
 
 def destroy_kv(path, versions, opts, context):
     """
     Destroy secret <versions> at <path>. Requires KV v2.
     """
-    kv = _get_kv(opts, context)
+    kv, config = get_kv(opts, context, get_config=True)
     try:
         return kv.destroy(path, versions)
     except VaultPermissionDeniedError:
-        clear_cache(opts, context)
-        kv = _get_kv(opts, context)
-        return kv.destroy(path, versions)
+        if not _check_clear(config, kv.client):
+            raise
+
+    # in case policies have changed
+    clear_cache(opts, context)
+    kv = get_kv(opts, context)
+    return kv.destroy(path, versions)
 
 
 def list_kv(path, opts, context):
@@ -271,16 +302,39 @@ def list_kv(path, opts, context):
     List secrets at <path>. Returns ``{"keys": []}`` by default
     for backwards-compatibility reasons, unless <keys_only> is True.
     """
-    kv = _get_kv(opts, context)
+    kv, config = get_kv(opts, context, get_config=True)
     try:
         return kv.list(path)
     except VaultPermissionDeniedError:
-        clear_cache(opts, context)
-        kv = _get_kv(opts, context)
-        return kv.list(path)
+        if not _check_clear(config, kv.client):
+            raise
+
+    # in case policies have changed
+    clear_cache(opts, context)
+    kv = get_kv(opts, context)
+    return kv.list(path)
 
 
-def _get_kv(opts, context):
+def _check_clear(config, client):
+    """
+    Called when encountering a VaultPermissionDeniedError.
+    Decides whether caches should be cleared to retry with
+    possibly updated token policies.
+    """
+    if config["cache"]["clear_on_unauthorized"]:
+        return True
+    try:
+        # verify the current token is still valid
+        return not client.token_valid(remote=True)
+    except VaultAuthExpired:
+        return True
+
+
+def get_kv(opts, context, get_config=False):
+    """
+    Return an instance of VaultKV, which can be used
+    to interact with the ``kv`` backend.
+    """
     client, config = get_authd_client(opts, context, get_config=True)
     ttl = None
     connection = True
@@ -290,37 +344,53 @@ def _get_kv(opts, context):
     cbank = _get_cache_bank(opts, connection=connection)
     ckey = "secret_path_metadata"
     metadata_cache = VaultCache(
-        context, cbank, ckey, cache_backend=_get_cache_backend(config, opts), ttl=ttl
+        context,
+        cbank,
+        ckey,
+        cache_backend=_get_cache_backend(config, opts),
+        ttl=ttl,
     )
-    return VaultKV(client, metadata_cache)
+    kv = VaultKV(client, metadata_cache)
+    if get_config:
+        return kv, config
+    return kv
 
 
-def get_lease_store(opts, context):
+def get_lease_store(opts, context, get_config=False):
     """
     Return an instance of LeaseStore, which can be used
     to cache leases and handle operations like renewals and revocations.
     """
     client, config = get_authd_client(opts, context, get_config=True)
     session_cbank = _get_cache_bank(opts, session=True)
+    expire_events = None
+    if config["cache"]["expire_events"]:
+        expire_events = _get_event(opts)
     lease_cache = VaultLeaseCache(
         context,
         session_cbank + "/leases",
         cache_backend=_get_cache_backend(config, opts),
+        expire_events=expire_events,
     )
-    return LeaseStore(client, lease_cache)
+    store = LeaseStore(client, lease_cache, expire_events=expire_events)
+    if get_config:
+        return store, config
+    return store
 
 
 def get_approle_api(opts, context, force_local=False):
-    client, config = get_authd_client(
-        opts, context, get_config=True, force_local=force_local
-    )
+    """
+    Return an instance of AppRoleApi containing an AuthenticatedVaultClient.
+    """
+    client = get_authd_client(opts, context, force_local=force_local)
     return AppRoleApi(client)
 
 
 def get_identity_api(opts, context, force_local=False):
-    client, config = get_authd_client(
-        opts, context, get_config=True, force_local=force_local
-    )
+    """
+    Return an instance of IdentityApi containing an AuthenticatedVaultClient.
+    """
+    client = get_authd_client(opts, context, force_local=force_local)
     return IdentityApi(client)
 
 
@@ -329,8 +399,17 @@ def clear_cache(
 ):
     """
     Clears the Vault cache.
-    It is organized in a hierarchy: ``/vault/connection/session``
-    The master keeps a separate copy of the above per minion
+    Will ensure the current token and associated leases are revoked
+    by default.
+
+    It is organized in a hierarchy: ``/vault/connection/session/leases``.
+    (italics mark data that is only cached when receiving configuration from a master)
+
+    ``connection`` contains KV metadata (by default) and *configuration*.
+    ``session`` contains the currently active token and *auth credentials*.
+    ``leases`` contains issued leases like database credentials.
+
+    A master keeps a separate instance of the above per minion
     in ``minions/<minion_id>``.
 
     opts
@@ -345,6 +424,7 @@ def clear_cache(
     connection
         Only clear the cached data scoped to a connection. This includes
         configuration, auth credentials and leases. Defaults to true.
+        Set this to false to clear all Vault caches.
 
     session
         Only clear the cached data scoped to a session. This only includes
@@ -358,11 +438,24 @@ def clear_cache(
         regardless of determined run type. Defaults to false and should not
         be set by anything other than the runner.
     """
-    # Ensure the active client gets recreated after clearing the cache
-    context.pop(CLIENT_CKEY, None)
     cbank = _get_cache_bank(
         opts, connection=connection, session=session, force_local=force_local
     )
+    client, config = _build_revocation_client(opts, context, force_local=force_local)
+    # config and client will both be None if the cached data is invalid
+    if config:
+        # Don't revoke the only token that is available to us
+        if config["auth"]["method"] != "token" or not (
+            force_local
+            or _get_salt_run_type(opts)
+            in (SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL)
+        ):
+            if config["cache"]["clear_attempt_revocation"]:
+                client.token_revoke(config["cache"]["clear_attempt_revocation"])
+            if config["cache"]["expire_events"]:
+                scope = cbank.split("/")[-1]
+                _get_event(opts)(tag=f"vault/cache/{scope}/clear")
+
     if cbank in context:
         if ckey is None:
             context.pop(cbank)
@@ -538,6 +631,21 @@ def get_authd_client(opts, context, force_local=False, get_config=False):
     """
     Returns an AuthenticatedVaultClient that is valid for at least one query.
     """
+
+    def try_build():
+        client = config = None
+        retry = False
+        try:
+            client, config = _build_authd_client(opts, context, force_local=force_local)
+        except (VaultConfigExpired, VaultPermissionDeniedError, ConnectionError):
+            clear_cache(opts, context, connection=True, force_local=force_local)
+            retry = True
+        except VaultUnwrapException as err:
+            # ensure to notify about potential intrusion attempt
+            _get_event(opts)(tag="vault/security/unwrapping/error", data=err.event_data)
+            raise
+        return client, config, retry
+
     cbank = _get_cache_bank(opts, force_local=force_local)
     retry = False
     client = config = None
@@ -547,7 +655,7 @@ def get_authd_client(opts, context, force_local=False, get_config=False):
     if cbank in context and CLIENT_CKEY in context[cbank]:
         log.debug("Fetching client instance and config from context")
         client, config = context[cbank][CLIENT_CKEY]
-        if not client.token_valid():
+        if not client.token_valid(remote=False):
             log.debug("Cached client instance was invalid")
             client = config = None
             context[cbank].pop(CLIENT_CKEY)
@@ -555,10 +663,10 @@ def get_authd_client(opts, context, force_local=False, get_config=False):
     # Otherwise, try to build one from possibly cached data
     if client is None or config is None:
         try:
-            client, config = _build_authd_client(opts, context, force_local=force_local)
-        except (VaultAuthExpired, VaultConfigExpired, VaultPermissionDeniedError):
-            # On failure, signal to clear caches and retry
-            retry = True
+            client, config, retry = try_build()
+        except VaultAuthExpired:
+            clear_cache(opts, context, session=True, force_local=force_local)
+            client, config, retry = try_build()
 
     # Check if the token needs to be and can be renewed.
     # Since this needs to check the possibly active session and does not care
@@ -576,26 +684,31 @@ def get_authd_client(opts, context, force_local=False, get_config=False):
             increment=config["auth"]["token_lifecycle"]["renew_increment"]
         )
 
-    # Check if there was a problem with cached data or if
-    # the current token could not be renewed for a sufficient amount of time.
-    if retry or not client.token_valid(
+    # Check if the current token could not be renewed for a sufficient amount of time.
+    if not retry and not client.token_valid(
         config["auth"]["token_lifecycle"]["minimum_ttl"] or 0, remote=False
     ):
-        log.debug("Deleting cache and requesting new authentication credentials")
-        clear_cache(opts, context, force_local=force_local)
-        client, config = _build_authd_client(opts, context, force_local=force_local)
+        clear_cache(opts, context, session=True, force_local=force_local)
+        client, config, retry = try_build()
+
+    if retry:
+        log.debug("Requesting new authentication credentials")
+        try:
+            client, config = _build_authd_client(opts, context, force_local=force_local)
+        except VaultUnwrapException as err:
+            _get_event(opts)(tag="vault/security/unwrapping/error", data=err.event_data)
+            raise
         if not client.token_valid(
             config["auth"]["token_lifecycle"]["minimum_ttl"] or 0, remote=False
         ):
-            if config["auth"]["token_lifecycle"]["minimum_ttl"]:
-                log.warning(
-                    "Configuration error: auth:token_lifecycle:minimum_ttl cannot be "
-                    "honored because fresh tokens are issued with less ttl. Continuing anyways."
-                )
-            else:
+            if not config["auth"]["token_lifecycle"]["minimum_ttl"]:
                 raise VaultException(
                     "Could not build valid client. This is most likely a bug."
                 )
+            log.warning(
+                "Configuration error: auth:token_lifecycle:minimum_ttl cannot be "
+                "honored because fresh tokens are issued with less ttl. Continuing anyways."
+            )
 
     if cbank not in context:
         context[cbank] = {}
@@ -623,6 +736,7 @@ def _build_authd_client(opts, context, force_local=False):
         VaultToken,
         cache_backend=_get_cache_backend(config, opts),
         ttl=cache_ttl,
+        flush_exception=VaultAuthExpired,
     )
 
     client = None
@@ -687,7 +801,41 @@ def _build_authd_client(opts, context, force_local=False):
     raise salt.exceptions.SaltException("Connection configuration is invalid.")
 
 
-def _get_connection_config(cbank, opts, context, force_local=False):
+def _build_revocation_client(opts, context, force_local=False):
+    """
+    Tries to build an AuthenticatedVaultClient solely from caches.
+    This client is used to revoke all leases before forgetting about them.
+    """
+    connection_cbank = _get_cache_bank(opts, force_local=force_local)
+    # Disregard a possibly returned locally configured token since
+    # it is cached with metadata if it has been used. Also, we do not want
+    # to revoke statically configured tokens anyways.
+    config, _, unauthd_client = _get_connection_config(
+        connection_cbank, opts, context, force_local=force_local, pre_flush=True
+    )
+    if config is None:
+        return None, None
+
+    # Tokens are cached in a distinct scope to enable cache per session
+    session_cbank = _get_cache_bank(opts, force_local=force_local, session=True)
+    token_cache = VaultAuthCache(
+        context,
+        session_cbank,
+        TOKEN_CKEY,
+        VaultToken,
+        cache_backend=_get_cache_backend(config, opts),
+    )
+
+    token = token_cache.get(flush=False)
+
+    if token is None:
+        return None, None
+    auth = VaultTokenAuth(token=token, cache=token_cache)
+    client = AuthenticatedVaultClient(auth, session=unauthd_client.session, **config["server"])
+    return client, config
+
+
+def _get_connection_config(cbank, opts, context, force_local=False, pre_flush=False):
     if (
         _get_salt_run_type(opts) in [SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL]
         or force_local
@@ -697,13 +845,20 @@ def _get_connection_config(cbank, opts, context, force_local=False):
 
     log.debug("Using Vault server connection configuration from remote.")
     config_cache = _get_config_cache(opts, context, cbank, "config")
-
-    # In case cached data is available, this takes care of resetting
-    # all connection-scoped data if the config is outdated.
+    if pre_flush:
+        # ensure any cached data is tried when building a client for revocation
+        config_cache.ttl = None
+    # In case cached data is available, this takes care of bubbling up
+    # an exception indicating all connection-scoped data should be flushed
+    # if the config is outdated.
     config = config_cache.get()
     if config is not None:
         log.debug("Using cached Vault server connection configuration.")
         return config, None, VaultClient(**config["server"])
+
+    if pre_flush:
+        # used when building a client that revokes leases before clearing cache
+        return None, None, None
 
     log.debug("Using new Vault server connection configuration.")
     try:
@@ -718,7 +873,7 @@ def _get_connection_config(cbank, opts, context, force_local=False):
     except VaultConfigExpired as err:
         # Make sure to still work with old peer_run configuration
         if "Peer runner return was empty" not in err.message:
-            raise err
+            raise
         log.warning(
             "Got empty response to Vault config request. Falling back to vault.generate_token. "
             "Please update your master peer_run configuration."
@@ -970,10 +1125,14 @@ def _query_master(
                 if not wrapped or "wrap_info" not in wrapped:
                     continue
                 wrapped_response = VaultWrappedResponse(**wrapped["wrap_info"])
-                unwrapped_response = unwrap_client.unwrap(
-                    wrapped_response,
-                    expected_creation_path=unwrap_expected_creation_path,
-                )
+                try:
+                    unwrapped_response = unwrap_client.unwrap(
+                        wrapped_response,
+                        expected_creation_path=unwrap_expected_creation_path,
+                    )
+                except VaultUnwrapException as err:
+                    err.event_data.update({"func": f"vault.{func}"})
+                    raise
                 if key:
                     salt.utils.dictupdate.set_dict_key_value(
                         result,
@@ -1056,6 +1215,16 @@ def _query_master(
     )
 
 
+def _get_event(opts):
+    if opts.get("__role") == "master":
+        return salt.utils.event.get_master_event(opts, opts["sock_dir"]).fire_event
+
+    global __salt__  # pylint: disable=global-statement
+    if not __salt__:
+        __salt__ = salt.loader.minion_mods(opts)
+    return __salt__["event.send"]
+
+
 def parse_config(config, validate=True, opts=None):
     """
     Returns a vault configuration dictionary that has all
@@ -1074,7 +1243,10 @@ def parse_config(config, validate=True, opts=None):
         },
         "cache": {
             "backend": "session",
+            "clear_attempt_revocation": 60,
+            "clear_on_unauthorized": True,
             "config": 3600,
+            "expire_events": False,
             "kv_metadata": "connection",
             "secret": "ttl",
         },
@@ -1224,16 +1396,23 @@ class VaultException(salt.exceptions.SaltException):
     """
 
 
+class VaultLeaseExpired(VaultException):
+    """
+    Raised when a cached lease is reported to be expired locally.
+    """
+
+
 class VaultAuthExpired(VaultException):
     """
-    Raised when authentication data is reported to be outdated locally.
+    Raised when cached authentication data is reported to be outdated locally.
     """
 
 
 class VaultConfigExpired(VaultException):
     """
     Raised when secret authentication data queried from the master reports
-    a different server configuration than locally cached.
+    a different server configuration than locally cached or an explicit
+    cache TTL set in the configuration has been reached.
     """
 
 
@@ -1243,6 +1422,25 @@ class VaultUnwrapException(VaultException):
     from the reported one.
     This has to be taken seriously as it indicates tampering.
     """
+
+    def __init__(self, expected, actual, url, namespace, verify, *args, **kwargs):
+        msg = (
+            "Wrapped response was not created from expected Vault path: "
+            f"`{actual}` is not matched by any of `{expected}`.\n"
+            "This indicates tampering with the wrapping token by a third party "
+            "and should be taken very seriously! If you changed some authentication-"
+            "specific configuration on the master recently, especially minion "
+            "approle mount, you should consider if this error was caused by outdated "
+            "cached data on this minion instead."
+        )
+        super().__init__(msg, *args, **kwargs)
+        self.event_data = {
+            "expected": expected,
+            "actual": actual,
+            "url": url,
+            "namespace": namespace,
+            "verify": verify,
+        }
 
 
 # https://www.vaultproject.io/api-docs#http-status-codes
@@ -1448,15 +1646,12 @@ class VaultClient:
                 re.fullmatch(p, wrap_info["creation_path"])
                 for p in expected_creation_path
             ):
-                # TODO: consider firing an event here as well
                 raise VaultUnwrapException(
-                    "Wrapped response was not created from expected Vault path: "
-                    f"`{wrap_info['creation_path']}` is not matched by any of `{expected_creation_path}`.\n"
-                    "This indicates tampering with the wrapping token by a third party "
-                    "and should be taken very seriously! If you changed some authentication-"
-                    "specific configuration on the master recently, especially minion "
-                    "approle mount, you should consider if this error was caused by outdated "
-                    "cached data on this minion instead."
+                    actual=wrap_info["creation_path"],
+                    expected=expected_creation_path,
+                    url=self.url,
+                    namespace=self.namespace,
+                    verify=self.verify,
                 )
         url = self._get_url("sys/wrapping/unwrap")
         headers = self._get_headers()
@@ -1675,6 +1870,32 @@ class AuthenticatedVaultClient(VaultClient):
             self.auth.update_token(res["auth"])
         return res["auth"]
 
+    def token_revoke(self, delta=1, token=None, accessor=None):
+        """
+        Revoke a token by setting its TTL to 1s.
+
+        delta
+            The time in seconds to request revocation after.
+            Defaults to 1s.
+
+        token
+            The token that should be revoked. Optional.
+            If token and accessor are unset, revokes the token currently in use
+            by this client.
+
+        accessor
+            The accessor of the token that should be revoked. Optional.
+        """
+        try:
+            self.token_renew(increment=delta, token=token, accessor=accessor)
+        except (VaultPermissionDeniedError, VaultNotFoundError, VaultAuthExpired):
+            # if we're trying to revoke ourselves and this happens,
+            # the token was already invalid
+            if token or accessor:
+                raise
+            return False
+        return True
+
     def request_raw(
         self,
         method,
@@ -1836,7 +2057,7 @@ class DropInitKwargsMixin:
     Mixin that breaks the chain of passing unhandled kwargs up the MRO.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs):  # pylint: disable=unused-argument
         super().__init__(*args)
 
 
@@ -2067,11 +2288,14 @@ class CommonCache:
     Base class that unifies context and other cache backends.
     """
 
-    def __init__(self, context, cbank, cache_backend=None, ttl=None):
+    def __init__(
+        self, context, cbank, cache_backend=None, ttl=None, flush_exception=None
+    ):
         self.context = context
         self.cbank = cbank
         self.cache = cache_backend
         self.ttl = ttl
+        self.flush_exception = flush_exception
 
     def _ckey_exists(self, ckey, flush=True):
         if self.cbank in self.context and ckey in self.context[self.cbank]:
@@ -2110,6 +2334,10 @@ class CommonCache:
         self.context[self.cbank][ckey] = value
 
     def _flush(self, ckey=None):
+        if not ckey and self.flush_exception is not None:
+            # Flushing caches in Vault often requires an orchestrated effort
+            # to ensure leases/sessions are terminated instead of left open.
+            raise self.flush_exception()
         if self.cache is not None:
             self.cache.flush(self.cbank, ckey)
         if self.cbank in self.context:
@@ -2138,8 +2366,16 @@ class VaultCache(CommonCache):
     like secret path metadata. Uses a single cache key.
     """
 
-    def __init__(self, context, cbank, ckey, cache_backend=None, ttl=None):
-        super().__init__(context, cbank, cache_backend=cache_backend, ttl=ttl)
+    def __init__(
+        self, context, cbank, ckey, cache_backend=None, ttl=None, flush_exception=None
+    ):
+        super().__init__(
+            context,
+            cbank,
+            cache_backend=cache_backend,
+            ttl=ttl,
+            flush_exception=flush_exception,
+        )
         self.ckey = ckey
 
     def exists(self, flush=True):
@@ -2180,6 +2416,7 @@ class VaultConfigCache(VaultCache):
         opts,
         cache_backend_factory=_get_cache_backend,
         init_config=None,
+        flush_exception=None,
     ):  # pylint: disable=super-init-not-called
         self.context = context
         self.cbank = cbank
@@ -2189,6 +2426,7 @@ class VaultConfigCache(VaultCache):
         self.cache = None
         self.ttl = None
         self.cache_backend_factory = cache_backend_factory
+        self.flush_exception = flush_exception
         if init_config is not None:
             self._load(init_config)
 
@@ -2251,6 +2489,7 @@ class LeaseCacheMixin:
 
     def __init__(self, *args, **kwargs):
         self.lease_cls = kwargs.pop("lease_cls", VaultLease)
+        self.expire_events = kwargs.pop("expire_events", None)
         super().__init__(*args, **kwargs)
 
     def _check_validity(self, lease_data, valid_for=0):
@@ -2258,6 +2497,8 @@ class LeaseCacheMixin:
         if lease.is_valid(valid_for):
             log.debug("Using cached lease.")
             return lease
+        if self.expire_events is not None:
+            raise VaultLeaseExpired()
         return None
 
 
@@ -2275,7 +2516,13 @@ class VaultLeaseCache(LeaseCacheMixin, CommonCache):
         data = self._get_ckey(ckey, flush=flush)
         if data is None:
             return data
-        ret = self._check_validity(data, valid_for=valid_for)
+        try:
+            ret = self._check_validity(data, valid_for=valid_for)
+        except VaultLeaseExpired:
+            self.expire_events(
+                tag=f"vault/lease/{ckey}/expire", data={"valid_for_less": valid_for}
+            )
+            ret = None
         if ret is None and flush:
             log.debug("Cached lease not valid anymore. Flushing cache.")
             self._flush(ckey)
@@ -2293,7 +2540,8 @@ class VaultLeaseCache(LeaseCacheMixin, CommonCache):
 
     def exists(self, ckey, flush=True):
         """
-        Check whether a named lease exists in cache
+        Check whether a named lease exists in cache. Does not filter invalid ones,
+        so fetching a reported one might still return None.
         """
         return self._ckey_exists(ckey, flush=flush)
 
@@ -2317,11 +2565,26 @@ class VaultAuthCache(LeaseCacheMixin, CommonCache):
     the cached secrets are still valid before returning.
     """
 
-    def __init__(self, context, cbank, ckey, auth_cls, cache_backend=None, ttl=None):
+    def __init__(
+        self,
+        context,
+        cbank,
+        ckey,
+        auth_cls,
+        cache_backend=None,
+        ttl=None,
+        flush_exception=None,
+    ):
         super().__init__(
-            context, cbank, lease_cls=auth_cls, cache_backend=cache_backend, ttl=ttl
+            context,
+            cbank,
+            lease_cls=auth_cls,
+            cache_backend=cache_backend,
+            ttl=ttl,
+            flush_exception=flush_exception,
         )
         self.ckey = ckey
+        self.flush_exception = flush_exception
 
     def exists(self, flush=True):
         """
@@ -2356,11 +2619,11 @@ class VaultAuthCache(LeaseCacheMixin, CommonCache):
     def flush(self, cbank=None):
         """
         Flush the cached auth credentials. If this is a token cache,
-        flushing it will delete the whole session-scoped cache bank by default.
+        flushing it will delete the whole session-scoped cache bank.
         """
-        if cbank is None:
-            # flush the whole cbank (session-scope) if this is a token cache by default
-            ckey = None if self.lease_cls is VaultToken else self.ckey
+        if self.lease_cls is VaultToken:
+            # flush the whole cbank (session-scope) if this is a token cache
+            ckey = None
         else:
             ckey = None if cbank else self.ckey
         return self._flush(ckey)
@@ -2387,7 +2650,14 @@ def _get_config_cache(opts, context, cbank, ckey):
                 # expiration check is done inside the class
                 config = cache.fetch(cbank, ckey)
 
-    return VaultConfigCache(context, cbank, ckey, opts, init_config=config)
+    return VaultConfigCache(
+        context,
+        cbank,
+        ckey,
+        opts,
+        init_config=config,
+        flush_exception=VaultConfigExpired,
+    )
 
 
 class VaultTokenAuth:
@@ -2451,10 +2721,10 @@ class VaultTokenAuth:
 
     def _write_cache(self):
         if self.cache is not None:
-            if self.token.is_valid():
-                self.cache.store(self.token)
-            else:
-                self.cache.flush()
+            # Write the token indiscriminately since flushing
+            # raises VaultAuthExpired.
+            # This will be handled as part of the next request.
+            self.cache.store(self.token)
 
 
 class VaultAppRoleAuth:
@@ -2871,11 +3141,12 @@ class LeaseStore:
     Caches leases and handles lease operations
     """
 
-    def __init__(self, client, cache):
+    def __init__(self, client, cache, expire_events=None):
         self.client = client
         self.cache = cache
         # to update cached leases after renewal/revocation, we need a mapping id => ckey
         self.lease_id_ckey_cache = {}
+        self.expire_events = expire_events
 
     def get(
         self,
@@ -2884,7 +3155,7 @@ class LeaseStore:
         renew=True,
         renew_increment=None,
         renew_blur=2,
-        revoke=True,
+        revoke=60,
     ):
         """
         Return cached lease or None.
@@ -2922,9 +3193,9 @@ class LeaseStore:
             Defaults to 2.
 
         revoke
-            If the lease is invalid or not valid for ``valid_for`` and renewals
-            are disabled or impossible, attempt to revoke the lease if possible
-            and flush the cache. Defaults to true.
+            If the lease is not valid for ``valid_for`` and renewals
+            are disabled or impossible, attempt to have Vault revoke the lease
+            after this amount of time and flush the cache. Defaults to 60s.
         """
         if renew_increment is not None and timestring_map(valid_for) > timestring_map(
             renew_increment
@@ -2934,26 +3205,38 @@ class LeaseStore:
             )
 
         def check_revoke(lease):
+            if self.expire_events is not None:
+                self.expire_events(
+                    tag=f"vault/lease/{ckey}/expire", data={"valid_for_less": valid_for}
+                )
             if revoke:
-                self.revoke(lease)
+                self.revoke(lease, delta=revoke)
             return None
 
         # Since we can renew leases, do not check for future validity in cache
-        lease = self.cache.get(ckey, flush=revoke)
+        lease = self.cache.get(ckey, flush=bool(revoke))
         if lease is not None:
             self.lease_id_ckey_cache[str(lease)] = ckey
         if lease is None or lease.is_valid(valid_for):
             return lease
         if not renew:
             return check_revoke(lease)
-        lease = self.renew(lease, increment=renew_increment, raise_error=False)
+        try:
+            lease = self.renew(lease, increment=renew_increment, raise_all_errors=False)
+        except VaultNotFoundError:
+            # The cached lease was already revoked
+            return check_revoke(lease)
         if not lease.is_valid(valid_for, blur=renew_blur):
             if renew_increment is not None:
                 # valid_for cannot possibly be respected
                 return check_revoke(lease)
             # Maybe valid_for is greater than the default validity period, so check if
             # the lease can be renewed by valid_for
-            lease = self.renew(lease, increment=valid_for, raise_error=False)
+            try:
+                lease = self.renew(lease, increment=valid_for, raise_all_errors=False)
+            except VaultNotFoundError:
+                # The cached lease was already revoked
+                return check_revoke(lease)
             if not lease.is_valid(valid_for, blur=renew_blur):
                 return check_revoke(lease)
         return lease
@@ -2975,7 +3258,7 @@ class LeaseStore:
         payload = {"lease_id": str(lease)}
         return self.client.post(endpoint, payload=payload)
 
-    def renew(self, lease, increment=None, raise_error=True):
+    def renew(self, lease, increment=None, raise_all_errors=True, _store=True):
         """
         Renew a lease.
 
@@ -2988,10 +3271,11 @@ class LeaseStore:
             The server might not honor this increment.
             Can be an integer (seconds) or a time string like ``1h``. Optional.
 
-        raise_error
+        raise_all_errors
             When ``lease`` is a VaultLease and the renewal does not succeed,
             do not catch exceptions. If this is false, the lease will be returned
-            unmodified. Defaults to true.
+            unmodified if the exception does not indicate it is invalid (NotFound).
+            Defaults to true.
         """
         endpoint = "sys/leases/renew"
         payload = {"lease_id": str(lease)}
@@ -3003,12 +3287,14 @@ class LeaseStore:
                 raise VaultNotFoundError("Lease is already expired")
         try:
             ret = self.client.post(endpoint, payload=payload)
-        except VaultException:
-            if raise_error or not isinstance(lease, VaultLease):
+        except VaultException as err:
+            if raise_all_errors or not isinstance(lease, VaultLease):
+                raise
+            if isinstance(err, VaultNotFoundError):
                 raise
             return lease
 
-        if isinstance(lease, VaultLease):
+        if _store and isinstance(lease, VaultLease):
             # Do not overwrite data of renewed leases!
             ret.pop("data", None)
             new_lease = lease.with_renewed(**ret)
@@ -3049,7 +3335,7 @@ class LeaseStore:
             raise VaultException(f"Failed renewing some leases: {list(failed)}")
         return True
 
-    def revoke(self, lease, sync=False, allow_validity_reduction=True):
+    def revoke(self, lease, delta=60):
         """
         Revoke a lease. Will also remove the cached lease,
         if it has been requested from this LeaseStore before.
@@ -3057,25 +3343,16 @@ class LeaseStore:
         lease
             A lease ID or VaultLease object to revoke.
 
-        sync
-            Only return once the lease has been revoked. Defaults to false.
-
-        allow_validity_reduction
-            If a revocation is denied on the grounds of missing permissions,
-            instead reduce the lease validity to 1 second.
-            The default policy does not include the necessary permissions for
-            revocation, hence this switch. Defaults to true.
+        delta
+            Time after which the lease should be requested
+            to be revoked by Vault.
+            Defaults to 60s.
         """
-        endpoint = "sys/leases/revoke"
-        payload = {"lease_id": str(lease), "sync": sync}
         try:
-            self.client.post(endpoint, payload=payload)
+            # 0 would attempt a complete renewal
+            self.renew(lease, increment=delta or 1, _store=False)
         except VaultNotFoundError:
             pass
-        except VaultPermissionDeniedError:
-            if not allow_validity_reduction:
-                raise
-            self.renew(lease, increment=1)
 
         if str(lease) in self.lease_id_ckey_cache:
             self.cache.flush(self.lease_id_ckey_cache.pop(str(lease)))
@@ -3084,8 +3361,7 @@ class LeaseStore:
     def revoke_cached(
         self,
         match="*",
-        sync=False,
-        allow_validity_reduction=True,
+        delta=60,
         flush_on_failure=True,
     ):
         """
@@ -3095,14 +3371,9 @@ class LeaseStore:
             Only revoke cached leases whose ckey matches this glob pattern.
             Defaults to ``*``.
 
-        sync
-            Wait for revocation success of all leases. Defaults to false.
-
-        allow_validity_reduction
-            If a revocation is denied on the grounds of missing permissions,
-            instead reduce the lease validity to 1 second.
-            The default policy does not include the necessary permissions for
-            revocation, hence this switch. Defaults to true.
+        delta
+            Time after which the leases should be revoked by Vault.
+            Defaults to 60s.
 
         flush_on_failure
             If a revocation fails, remove the lease from cache anyways.
@@ -3117,9 +3388,7 @@ class LeaseStore:
                 continue
             self.lease_id_ckey_cache[str(lease)] = ckey
             try:
-                self.revoke(
-                    lease, sync=sync, allow_validity_reduction=allow_validity_reduction
-                )
+                self.revoke(lease, delta=delta)
             except VaultPermissionDeniedError:
                 failed.append(ckey)
                 if flush_on_failure:
@@ -3427,7 +3696,7 @@ def make_request(
         "Argon",
         "salt.utils.vault.make_request is deprecated, please use "
         "salt.utils.vault.query or salt.utils.vault.query_raw."
-        "To override token/url/namespace, please make use of the"
+        "To override token/url/namespace, please make use of the "
         "provided classes directly.",
     )
 
