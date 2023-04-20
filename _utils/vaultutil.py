@@ -444,18 +444,26 @@ def clear_cache(
     client, config = _build_revocation_client(opts, context, force_local=force_local)
     # config and client will both be None if the cached data is invalid
     if config:
-        # Don't revoke the only token that is available to us
-        if config["auth"]["method"] != "token" or not (
-            force_local
-            or _get_salt_run_type(opts)
-            in (SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL)
-        ):
-            if config["cache"]["clear_attempt_revocation"]:
-                client.token_revoke(config["cache"]["clear_attempt_revocation"])
-            if config["cache"]["expire_events"]:
-                scope = cbank.split("/")[-1]
-                _get_event(opts)(tag=f"vault/cache/{scope}/clear")
-
+        try:
+            # Don't revoke the only token that is available to us
+            if config["auth"]["method"] != "token" or not (
+                force_local
+                or _get_salt_run_type(opts)
+                in (SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL)
+            ):
+                if config["cache"]["clear_attempt_revocation"]:
+                    delta = config["cache"]["clear_attempt_revocation"]
+                    if delta is True:
+                        delta = 1
+                    client.token_revoke(delta)
+                if config["cache"]["expire_events"]:
+                    scope = cbank.split("/")[-1]
+                    _get_event(opts)(tag=f"vault/cache/{scope}/clear")
+        except Exception as err:  # pylint: disable=broad-except
+            log.error(
+                "Failed to revoke token or send event before clearing cache:\n"
+                f"{type(err).__name__}: {err}"
+            )
     if cbank in context:
         if ckey is None:
             context.pop(cbank)
