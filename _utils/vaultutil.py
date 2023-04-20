@@ -489,6 +489,41 @@ def clear_cache(
     return cache.flush(cbank, ckey)
 
 
+def update_config(opts, context, keep_session=False):
+    """
+    Attempt to update the cached configuration without
+    clearing the currently active session.
+
+    opts
+        Pass __opts__.
+
+    context
+        Pass __context__.
+
+    keep_session
+        Only update configuration that can be updated without
+        creating a new login session.
+        If this is false, still tries to keep the active session,
+        but might clear it if the server configuration has changed
+        significantly.
+        Defaults to False.
+    """
+    if _get_salt_run_type(opts) in [SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL]:
+        # local configuration is not cached
+        return True
+    connection_cbank = _get_cache_bank(opts)
+    try:
+        _get_connection_config(connection_cbank, opts, context, update=True)
+        return True
+    except VaultConfigExpired:
+        pass
+    if keep_session:
+        return False
+    clear_cache(opts, context, connection=True)
+    get_authd_client(opts, context)
+    return True
+
+
 def _get_cache_backend(config, opts):
     if config["cache"]["backend"] == "session":
         return None
@@ -839,11 +874,15 @@ def _build_revocation_client(opts, context, force_local=False):
     if token is None:
         return None, None
     auth = VaultTokenAuth(token=token, cache=token_cache)
-    client = AuthenticatedVaultClient(auth, session=unauthd_client.session, **config["server"])
+    client = AuthenticatedVaultClient(
+        auth, session=unauthd_client.session, **config["server"]
+    )
     return client, config
 
 
-def _get_connection_config(cbank, opts, context, force_local=False, pre_flush=False):
+def _get_connection_config(
+    cbank, opts, context, force_local=False, pre_flush=False, update=False
+):
     if (
         _get_salt_run_type(opts) in [SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL]
         or force_local
@@ -851,6 +890,8 @@ def _get_connection_config(cbank, opts, context, force_local=False, pre_flush=Fa
         # only cache config fetched from remote
         return _use_local_config(opts)
 
+    if pre_flush and update:
+        raise VaultException("`pre_flush` and `update` are mutually exclusive")
     log.debug("Using Vault server connection configuration from remote.")
     config_cache = _get_config_cache(opts, context, cbank, "config")
     if pre_flush:
@@ -860,7 +901,7 @@ def _get_connection_config(cbank, opts, context, force_local=False, pre_flush=Fa
     # an exception indicating all connection-scoped data should be flushed
     # if the config is outdated.
     config = config_cache.get()
-    if config is not None:
+    if config is not None and not update:
         log.debug("Using cached Vault server connection configuration.")
         return config, None, VaultClient(**config["server"])
 
@@ -873,36 +914,51 @@ def _get_connection_config(cbank, opts, context, force_local=False, pre_flush=Fa
         issue_params = parse_config(opts.get("vault", {}), validate=False)[
             "issue_params"
         ]
-        config, unwrap_client = _query_master(
+        new_config, unwrap_client = _query_master(
             "get_config",
             opts,
             issue_params=issue_params or None,
+            config_only=update,
         )
     except VaultConfigExpired as err:
         # Make sure to still work with old peer_run configuration
-        if "Peer runner return was empty" not in err.message:
+        if "Peer runner return was empty" not in err.message or update:
             raise
         log.warning(
             "Got empty response to Vault config request. Falling back to vault.generate_token. "
             "Please update your master peer_run configuration."
         )
-        config, unwrap_client = _query_master(
+        new_config, unwrap_client = _query_master(
             "generate_token",
             opts,
             ttl=issue_params.get("explicit_max_ttl"),
             uses=issue_params.get("num_uses"),
             upgrade_request=True,
         )
-    config = parse_config(config, opts=opts)
+    new_config = parse_config(new_config, opts=opts)
     # do not couple token cache with configuration cache
-    embedded_token = config["auth"].pop("token", None)
-    config = {
-        "auth": config["auth"],
-        "cache": config["cache"],
-        "server": config["server"],
+    embedded_token = new_config["auth"].pop("token", None)
+    new_config = {
+        "auth": new_config["auth"],
+        "cache": new_config["cache"],
+        "server": new_config["server"],
     }
-    config_cache.store(config)
-    return config, embedded_token, unwrap_client
+    if update and config:
+        if new_config["server"] != config["server"]:
+            raise VaultConfigExpired()
+        if new_config["auth"]["method"] != config["auth"]["method"]:
+            raise VaultConfigExpired()
+        if new_config["auth"]["method"] == "approle" and (
+            new_config["auth"]["role_id"] != config["auth"]["role_id"]
+            or new_config["auth"]["secret_id"] is not config["auth"]["secret_id"]
+        ):
+            raise VaultConfigExpired()
+        if new_config["cache"]["backend"] != config["cache"]["backend"]:
+            raise VaultConfigExpired()
+        config_cache.flush(cbank=False)
+
+    config_cache.store(new_config)
+    return new_config, embedded_token, unwrap_client
 
 
 def _use_local_config(opts):

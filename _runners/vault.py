@@ -249,7 +249,13 @@ def _generate_token(minion_id, issue_params, wrap):
     return token.serialize_for_minion(), payload["num_uses"]
 
 
-def get_config(minion_id, signature, impersonated_by_master=False, issue_params=None):
+def get_config(
+    minion_id,
+    signature,
+    impersonated_by_master=False,
+    issue_params=None,
+    config_only=False,
+):
     """
     .. versionadded:: 3007.0
 
@@ -270,6 +276,11 @@ def get_config(minion_id, signature, impersonated_by_master=False, issue_params=
         Parameters for credential issuance.
         Requires ``vault:issue:allow_minion_override_params`` master configuration
         setting to be effective.
+
+    config_only
+        In case the master is configured to issue tokens, do not include a new
+        token in the response. This is used for configuration update checks.
+        Defaults to false.
     """
     log.debug(
         "Config request for %s (impersonated by master: %s)",
@@ -289,7 +300,7 @@ def get_config(minion_id, signature, impersonated_by_master=False, issue_params=
         }
         wrap = _config("issue:wrap")
 
-        if _config("issue:type") == "token":
+        if not config_only and _config("issue:type") == "token":
             minion_config["auth"]["token"], num_uses = _generate_token(
                 minion_id,
                 issue_params=issue_params,
@@ -1103,7 +1114,9 @@ def _lookup_entity_by_alias(minion_id):
     role_id = _lookup_role_id(minion_id, wrap=False)
     api = _get_identity_api()
     try:
-        return api.read_entity_by_alias(alias=role_id, mount=_config("issue:approle:mount"))
+        return api.read_entity_by_alias(
+            alias=role_id, mount=_config("issue:approle:mount")
+        )
     except vault.VaultNotFoundError:
         return False
 

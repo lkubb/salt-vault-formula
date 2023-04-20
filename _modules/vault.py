@@ -1263,6 +1263,30 @@ def query(method, endpoint, payload=None):
         raise CommandExecutionError("{}: {}".format(type(err).__name__, err)) from err
 
 
+def update_config(keep_session=False):
+    """
+    .. versionadded:: 3007.0
+
+    Attempt to update the cached configuration without clearing the
+    currently active session.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' vault.update_config
+
+    keep_session
+        Only update configuration that can be updated without
+        creating a new login session.
+        If this is false, still tries to keep the active session,
+        but might clear it if the server configuration has changed
+        significantly.
+        Defaults to False.
+    """
+    return vault.update_config(__opts__, __context__, keep_session=keep_session)
+
+
 def _safe_atomic_write(dst, data, backup):
     """
     Create a temporary file with only user r/w perms and atomically
