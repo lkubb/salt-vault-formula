@@ -378,20 +378,30 @@ def get_lease_store(opts, context, get_config=False):
     return store
 
 
-def get_approle_api(opts, context, force_local=False):
+def get_approle_api(opts, context, force_local=False, get_config=False):
     """
     Return an instance of AppRoleApi containing an AuthenticatedVaultClient.
     """
-    client = get_authd_client(opts, context, force_local=force_local)
-    return AppRoleApi(client)
+    client, config = get_authd_client(
+        opts, context, force_local=force_local, get_config=True
+    )
+    api = AppRoleApi(client)
+    if get_config:
+        return api, config
+    return api
 
 
-def get_identity_api(opts, context, force_local=False):
+def get_identity_api(opts, context, force_local=False, get_config=False):
     """
     Return an instance of IdentityApi containing an AuthenticatedVaultClient.
     """
-    client = get_authd_client(opts, context, force_local=force_local)
-    return IdentityApi(client)
+    client, config = get_authd_client(
+        opts, context, force_local=force_local, get_config=True
+    )
+    api = IdentityApi(client)
+    if get_config:
+        return api, config
+    return api
 
 
 def clear_cache(
@@ -403,11 +413,11 @@ def clear_cache(
     by default.
 
     It is organized in a hierarchy: ``/vault/connection/session/leases``.
-    (italics mark data that is only cached when receiving configuration from a master)
+    (*italics* mark data that is only cached when receiving configuration from a master)
 
-    ``connection`` contains KV metadata (by default) and *configuration*.
-    ``session`` contains the currently active token and *auth credentials*.
-    ``leases`` contains issued leases like database credentials.
+    ``connection`` contains KV metadata (by default), *configuration* and *(AppRole) auth credentials*.
+    ``session`` contains the currently active token.
+    ``leases`` contains leases issued to the currently active token like database credentials.
 
     A master keeps a separate instance of the above per minion
     in ``minions/<minion_id>``.
@@ -423,12 +433,14 @@ def clear_cache(
 
     connection
         Only clear the cached data scoped to a connection. This includes
-        configuration, auth credentials and leases. Defaults to true.
+        configuration, auth credentials, the currently active auth token
+        as well as leases and KV metadata (by default). Defaults to true.
         Set this to false to clear all Vault caches.
 
     session
         Only clear the cached data scoped to a session. This only includes
-        leases, not configuration/auth credentials. Defaults to false.
+        leases and the currently active auth token, but not configuration
+        or (AppRole) auth credentials. Defaults to false.
         Setting this to true will keep the connection cache, regardless
         of ``connection``.
 
@@ -441,29 +453,37 @@ def clear_cache(
     cbank = _get_cache_bank(
         opts, connection=connection, session=session, force_local=force_local
     )
-    client, config = _build_revocation_client(opts, context, force_local=force_local)
-    # config and client will both be None if the cached data is invalid
-    if config:
-        try:
-            # Don't revoke the only token that is available to us
-            if config["auth"]["method"] != "token" or not (
-                force_local
-                or _get_salt_run_type(opts)
-                in (SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL)
-            ):
-                if config["cache"]["clear_attempt_revocation"]:
-                    delta = config["cache"]["clear_attempt_revocation"]
-                    if delta is True:
-                        delta = 1
-                    client.token_revoke(delta)
-                if config["cache"]["expire_events"]:
-                    scope = cbank.split("/")[-1]
-                    _get_event(opts)(tag=f"vault/cache/{scope}/clear")
-        except Exception as err:  # pylint: disable=broad-except
-            log.error(
-                "Failed to revoke token or send event before clearing cache:\n"
-                f"{type(err).__name__}: {err}"
-            )
+    if (
+        not ckey
+        or (not (connection or session) and ckey == "connection")
+        or (session and ckey == TOKEN_CKEY)
+        or ((connection and not session) and ckey == "config")
+    ):
+        client, config = _build_revocation_client(
+            opts, context, force_local=force_local
+        )
+        # config and client will both be None if the cached data is invalid
+        if config:
+            try:
+                # Don't revoke the only token that is available to us
+                if config["auth"]["method"] != "token" or not (
+                    force_local
+                    or _get_salt_run_type(opts)
+                    in (SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL)
+                ):
+                    if config["cache"]["clear_attempt_revocation"]:
+                        delta = config["cache"]["clear_attempt_revocation"]
+                        if delta is True:
+                            delta = 1
+                        client.token_revoke(delta)
+                    if config["cache"]["expire_events"]:
+                        scope = cbank.split("/")[-1]
+                        _get_event(opts)(tag=f"vault/cache/{scope}/clear")
+            except Exception as err:  # pylint: disable=broad-except
+                log.error(
+                    "Failed to revoke token or send event before clearing cache:\n"
+                    f"{type(err).__name__}: {err}"
+                )
     if cbank in context:
         if ckey is None:
             context.pop(cbank)
@@ -935,7 +955,7 @@ def _get_connection_config(
             uses=issue_params.get("num_uses"),
             upgrade_request=True,
         )
-    new_config = parse_config(new_config, opts=opts)
+    new_config = parse_config(new_config, opts=opts, require_token=not update)
     # do not couple token cache with configuration cache
     embedded_token = new_config["auth"].pop("token", None)
     new_config = {
@@ -1289,7 +1309,7 @@ def _get_event(opts):
     return __salt__["event.send"]
 
 
-def parse_config(config, validate=True, opts=None):
+def parse_config(config, validate=True, opts=None, require_token=True):
     """
     Returns a vault configuration dictionary that has all
     keys with defaults. Checks if required data is available.
@@ -2130,9 +2150,13 @@ class AccessorMixin:
     Mixin that manages accessor information relevant for tokens/secret IDs
     """
 
-    def __init__(self, accessor=None, wrapped_accessor=None, **kwargs):
-        self.accessor = accessor if wrapped_accessor is None else wrapped_accessor
-        self.wrapping_accessor = accessor if wrapped_accessor is not None else None
+    def __init__(self, accessor=None, wrapping_accessor=None, **kwargs):
+        # ensure the accessor always points to the actual entity
+        if "wrapped_accessor" in kwargs:
+            wrapping_accessor = accessor
+            accessor = kwargs.pop("wrapped_accessor")
+        self.accessor = accessor
+        self.wrapping_accessor = wrapping_accessor
         super().__init__(**kwargs)
 
     def accessor_payload(self):
@@ -2322,15 +2346,19 @@ class VaultWrappedResponse(AccessorMixin, BaseLease):
 
     def __init__(
         self,
-        token,
-        ttl,
         creation_path,
-        wrapped_accessor=None,
         **kwargs,
     ):
-        super().__init__(lease_id=token, lease_duration=ttl, renewable=False, **kwargs)
+        if "token" in kwargs:
+            # Ensure response data from Vault is accepted as well
+            kwargs["lease_id"] = kwargs.pop("token")
+            kwargs["lease_duration"] = kwargs.pop("ttl")
+        if "renewable" not in kwargs:
+            # Not renewable might be incorrect, wrapped tokens are,
+            # but we cannot know what was wrapped here.
+            kwargs["renewable"] = False
+        super().__init__(**kwargs)
         self.creation_path = creation_path
-        self.wrapped_accessor = wrapped_accessor
 
     def serialize_for_minion(self):
         """
@@ -3569,17 +3597,29 @@ class AppRoleApi:
         response = self.client.post(endpoint, payload=payload, wrap=wrap)
         if wrap:
             secret_id = response
-            accessor = response.wrapped_accessor
         else:
             secret_id = VaultSecretId(**response["data"])
-            accessor = secret_id.accessor
         if not meta_info:
             return secret_id
         # Sadly, secret_id_num_uses is not part of the information returned
         meta_info = self.client.post(
-            endpoint + "-accessor/lookup", payload={"secret_id_accessor": accessor}
+            endpoint + "-accessor/lookup",
+            payload={"secret_id_accessor": secret_id.accessor},
         )["data"]
         return secret_id, meta_info
+
+    def read_secret_id(self, name, secret_id=None, accessor=None, mount="approle"):
+        if not secret_id and not accessor:
+            raise VaultInvocationError(
+                "Need either secret_id or accessor to read secret ID."
+            )
+        if secret_id:
+            endpoint = f"auth/{mount}/role/{name}/secret-id/lookup"
+            payload = {"secret_id": str(secret_id)}
+        else:
+            endpoint = f"auth/{mount}/role/{name}/secret-id-accessor/lookup"
+            payload = {"secret_id_accessor": accessor}
+        return self.client.post(endpoint, payload=payload)["data"]
 
     def destroy_secret_id(self, name, secret_id=None, accessor=None, mount="approle"):
         if not secret_id and not accessor:

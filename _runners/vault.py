@@ -633,6 +633,7 @@ def sync_approles(minions=None, up=False, down=False):
 
     for minion in set(minions) & set(list_approles()):
         _manage_approle(minion, issue_params=None)
+        _lookup_approle_cached(minion, refresh=True)
         __opts__.pop("_vault_runner_is_compiling_pillar_templates", None)
     return True
 
