@@ -723,13 +723,10 @@ def get_creds(name, static=False, cache=True, valid_for=0, mount="database"):
 
 
 def clear_cached(
-    name=None, mount=None, cache=None, static=None, allow_validity_reduction=True
+    name=None, mount=None, cache=None, static=None, delta=60, flush_on_failure=True
 ):
     """
-    Clear cached database credentials matching specified parameters.
-    Tries to revoke the leases, which requires ``update`` permissions
-    on ``sys/leases/revoke`` (not included in default policy),
-    otherwise reduces the validity period to 1 second by default.
+    Clear and revoke cached database credentials matching specified parameters.
 
     CLI Example:
 
@@ -751,9 +748,12 @@ def clear_cached(
     static
         Only clear static (``True``) or dynamic (``False``) credentials.
 
-    allow_validity_reduction
-        If a revocation is denied on the grounds of missing permissions,
-        instead reduce the lease validity to 1 second.
+    delta
+        Time after which the leases should be revoked by Vault.
+        Defaults to 60s.
+
+    flush_on_failure
+        If a revocation fails, remove the lease from cache anyways.
         Defaults to true.
     """
     creds_cache = vault.get_lease_store(__opts__, __context__)
@@ -763,7 +763,7 @@ def clear_cached(
     ptrn.append("*" if name is None else name)
     ptrn.append("*" if cache is None else "default" if cache is True else cache)
     return creds_cache.revoke_cached(
-        match=".".join(ptrn), allow_validity_reduction=allow_validity_reduction
+        match=".".join(ptrn), delta=delta, flush_on_failure=flush_on_failure
     )
 
 
