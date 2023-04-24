@@ -2214,23 +2214,6 @@ class VaultLease(BaseLease):
         self.data = data
         super().__init__(lease_id, **kwargs)
 
-    def is_valid(self, valid_for=0, blur=0):
-        """
-        Checks whether the lease is valid for an amount of time
-
-        valid_for
-            Check whether the token will still be valid in the future.
-            This can be an integer, which will be interpreted as seconds, or a
-            time string using the same format as Vault does:
-            Suffix ``s`` for seconds, ``m`` for minutes, ``h`` for hours, ``d`` for days.
-            Defaults to 0.
-
-        blur
-            Allow undercutting ``valid_for`` for this amount of seconds.
-            Defaults to 0.
-        """
-        return self.is_valid_for(valid_for, blur=blur)
-
 
 class VaultToken(UseCountMixin, AccessorMixin, BaseLease):
     """
@@ -2586,9 +2569,15 @@ class LeaseCacheMixin:
 
     def _check_validity(self, lease_data, valid_for=0):
         lease = self.lease_cls(**lease_data)
-        if lease.is_valid(valid_for):
-            log.debug("Using cached lease.")
-            return lease
+        try:
+            # is_valid on auth classes accounts for duration and uses
+            if lease.is_valid(valid_for):
+                log.debug("Using cached lease.")
+                return lease
+        except AttributeError:
+            if lease.is_valid_for(valid_for):
+                log.debug("Using cached lease.")
+                return lease
         if self.expire_events is not None:
             raise VaultLeaseExpired()
         return None
@@ -3309,7 +3298,7 @@ class LeaseStore:
         lease = self.cache.get(ckey, flush=bool(revoke))
         if lease is not None:
             self.lease_id_ckey_cache[str(lease)] = ckey
-        if lease is None or lease.is_valid(valid_for):
+        if lease is None or lease.is_valid_for(valid_for):
             return lease
         if not renew:
             return check_revoke(lease)
@@ -3318,7 +3307,7 @@ class LeaseStore:
         except VaultNotFoundError:
             # The cached lease was already revoked
             return check_revoke(lease)
-        if not lease.is_valid(valid_for, blur=renew_blur):
+        if not lease.is_valid_for(valid_for, blur=renew_blur):
             if renew_increment is not None:
                 # valid_for cannot possibly be respected
                 return check_revoke(lease)
@@ -3329,7 +3318,7 @@ class LeaseStore:
             except VaultNotFoundError:
                 # The cached lease was already revoked
                 return check_revoke(lease)
-            if not lease.is_valid(valid_for, blur=renew_blur):
+            if not lease.is_valid_for(valid_for, blur=renew_blur):
                 return check_revoke(lease)
         return lease
 
@@ -3528,7 +3517,6 @@ class AppRoleApi:
         token_ttl=None,
         token_max_ttl=None,
         token_policies=None,
-        policies=None,
         token_bound_cidrs=None,
         token_explicit_max_ttl=None,
         token_no_default_policy=None,
@@ -3548,7 +3536,6 @@ class AppRoleApi:
                 "token_ttl": token_ttl,
                 "token_max_ttl": token_max_ttl,
                 "token_policies": token_policies,
-                "policies": policies,
                 "token_bound_cidrs": token_bound_cidrs,
                 "token_explicit_max_ttl": token_explicit_max_ttl,
                 "token_no_default_policy": token_no_default_policy,
@@ -3619,7 +3606,10 @@ class AppRoleApi:
         else:
             endpoint = f"auth/{mount}/role/{name}/secret-id-accessor/lookup"
             payload = {"secret_id_accessor": accessor}
-        return self.client.post(endpoint, payload=payload)["data"]
+        ret = self.client.post(endpoint, payload=payload)
+        if isinstance(ret, dict):
+            return ret["data"]
+        raise VaultNotFoundError()
 
     def destroy_secret_id(self, name, secret_id=None, accessor=None, mount="approle"):
         if not secret_id and not accessor:
