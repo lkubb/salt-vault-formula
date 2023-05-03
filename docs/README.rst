@@ -103,6 +103,11 @@ Starts the vault service and enables it at boot time.
 Has a dependency on `vault.config`_.
 
 
+``vault.database``
+^^^^^^^^^^^^^^^^^^
+Manages database connections and their roles.
+
+
 ``vault.initialize``
 ^^^^^^^^^^^^^^^^^^^^
 Ensures a running Vault cluster has been initialized.
@@ -169,6 +174,13 @@ dependency on `vault.service.clean`_.
 ``vault.service.clean``
 ^^^^^^^^^^^^^^^^^^^^^^^
 Stops the vault service and disables it at boot time.
+
+
+``vault.database.clean``
+^^^^^^^^^^^^^^^^^^^^^^^^
+Removes managed database connections and their roles.
+Requires ``remove_all_data_for_sure`` to be set to true
+to prevent accidental damage.
 
 
 ``vault.pki.clean``

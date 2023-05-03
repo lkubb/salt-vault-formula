@@ -16,6 +16,7 @@ vault:
     group: vault
     user: vault
   config: {}
+  database: {}
   disable_swap: false
   init:
     key_shares: 3
@@ -31,6 +32,7 @@ vault:
     urls: []
   plugins: []
   plugins_absent: []
+  remove_all_data_for_sure: false
   version: null
 
   tofs:
