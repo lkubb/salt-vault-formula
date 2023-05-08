@@ -1334,6 +1334,26 @@ def update_config(keep_session=False):
     return vault.update_config(__opts__, __context__, keep_session=keep_session)
 
 
+def get_server_config():
+    """
+    .. versionadded:: TBD
+
+    Return the server connection configuration that's currently in use by Salt.
+    Contains ``url``, ``verify`` and ``namespace``.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' vault.get_server_config
+    """
+    try:
+        client = vault.get_authd_client(__opts__, __context__)
+        return client.get_config()
+    except SaltException as err:
+        raise CommandExecutionError("{}: {}".format(type(err).__name__, err)) from err
+
+
 def _safe_atomic_write(dst, data, backup):
     """
     Create a temporary file with only user r/w perms and atomically
