@@ -286,6 +286,7 @@ def get_secret_id(
     wrap=False,
     min_wrap_ttl=10,
     mount="approle",
+    all_data=False,
 ):
     """
     Generate a secret ID for an AppRole.
@@ -352,6 +353,11 @@ def get_secret_id(
     mount
         The name of the mount point the AppRole auth backend is mounted at.
         Defaults to ``approle``.
+
+    all_data
+        Return a dictionary of information, including [wrapping_]accessor, duration, expire_time etc.
+        If this is false, only returns the secret ID/wrapping token as a string.
+        Defaults to false.
     """
     if cache:
         ckey = f"secid.{mount}.{name}." + ("default" if cache is True else cache)
@@ -365,12 +371,13 @@ def get_secret_id(
             )
             secid_store.destroy_cached(match=ckey)
         else:
-            if isinstance(secret_id, vault.VaultSecretId):
-                return secret_id.to_dict()
-            if isinstance(
-                secret_id, vault.VaultWrappedResponse
-            ) and secret_id.is_valid_for(min_wrap_ttl):
-                return secret_id.to_dict()
+            if isinstance(secret_id, vault.VaultSecretId) or (
+                isinstance(secret_id, vault.VaultWrappedResponse)
+                and secret_id.is_valid_for(min_wrap_ttl)
+            ):
+                if all_data:
+                    return secret_id.to_dict()
+                return str(secret_id)
             secid_store.destroy_cached(match=ckey)
 
     try:
@@ -388,7 +395,9 @@ def get_secret_id(
         raise CommandExecutionError(f"{type(err).__name__}: {err}") from err
     if cache:
         secid_store.store(ckey, secret_id)
-    return secret_id.to_dict()
+    if all_data:
+        return secret_id.to_dict()
+    return str(secret_id)
 
 
 def lookup_secret_id(name, secret_id=None, accessor=None, mount="approle"):
