@@ -14,6 +14,8 @@
 include:
   - {{ sls_service_running }}
 
+{%- if vault.init %}
+
 Vault server has been initialized:
   vault_server.initialized:
     - output: {{ vault.init.output }}
@@ -24,3 +26,4 @@ Vault server has been initialized:
     - vault_addr: {{ vault.init.vault_addr or vault.config.api_addr }}
     - require:
       - sls: {{ sls_service_running }}
+{%- endif %}

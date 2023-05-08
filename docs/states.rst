@@ -14,7 +14,8 @@ The following states are found in this formula:
 This installs Vault,
 manages the Vault and system swap configuration
 and then starts the Vault service.
-Also ensures the cluster is initialized.
+Also ensures the cluster is initialized if ``vault:init``
+is not false.
 
 
 ``vault.package``

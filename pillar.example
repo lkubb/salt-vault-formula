@@ -6,7 +6,8 @@ vault:
   config: {}
     # Whether to ensure swap is disabled
   disable_swap: false
-    # Cluster initialization setting
+    # Cluster initialization setting. Set this to false
+    # to disable automatic initialization.
   init:
       # Number of generated key shares
     key_shares: 3
