@@ -10,9 +10,15 @@
     is not false.
 #}
 
+{%- set tplroot = tpldir.split("/")[0] %}
+{%- from tplroot ~ "/map.jinja" import mapdata as vault with context %}
+
 include:
   - .package
   - .config
+{%- if vault.cert %}
+  - .cert
+{%- endif %}
   - .service
 {%- if vault.init %}
   - .initialize

@@ -26,12 +26,31 @@
       "subcomponent_config": "",
       "git_username": "lkubb",
       "lookup": {
+        "paths": {
+          "api_cert": "/opt/vault/tls/server.pem",
+          "api_key": "/opt/vault/tls/server.key",
+          "ca_cert": "/opt/vault/tls/ca.pem",
+          "client_cert": "/opt/vault/tls/client.pem",
+          "client_key": "/opt/vault/tls/client.key"
+        },
         "group": "vault",
         "user": "vault"
       },
       "settings": {
         "version": null,
         "config": {},
+        "cert": {
+          "ca_server": null,
+          "cn": null,
+          "days_valid": 7,
+          "days_remaining": 3,
+          "intermediate": [],
+          "root": null,
+          "san": null,
+          "signing_cert": null,
+          "signing_policy": null,
+          "signing_private_key": null
+        },
         "disable_swap": false,
         "database": {},
         "init": {

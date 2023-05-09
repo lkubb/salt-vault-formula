@@ -12,5 +12,6 @@
 
 include:
   - .service.clean
+  - .cert.clean
   - .config.clean
   - .package.clean

@@ -2,6 +2,19 @@
 # yamllint disable rule:comments-indentation
 ---
 vault:
+    # Parameters for certificate generation via x509 module.
+    # Set cert to false to disable.
+  cert:
+    ca_server: null
+    cn: null
+    days_remaining: 3
+    days_valid: 7
+    intermediate: []
+    root: null
+    san: null
+    signing_cert: null
+    signing_policy: null
+    signing_private_key: null
     # Will be serialized as JSON
   config: {}
     # Whether to ensure swap is disabled
@@ -66,6 +79,12 @@ vault:
 
   lookup:
     group: vault
+    paths:
+      api_cert: /opt/vault/tls/server.pem
+      api_key: /opt/vault/tls/server.key
+      ca_cert: /opt/vault/tls/ca.pem
+      client_cert: /opt/vault/tls/client.pem
+      client_key: /opt/vault/tls/client.key
     user: vault
 
   tofs:

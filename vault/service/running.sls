@@ -2,10 +2,12 @@
 
 {%- set tplroot = tpldir.split("/")[0] %}
 {%- set sls_config_file = tplroot ~ ".config.file" %}
+{%- set sls_cert_managed = tplroot ~ ".cert.managed" %}
 {%- from tplroot ~ "/map.jinja" import mapdata as vault with context %}
 
 include:
   - {{ sls_config_file }}
+  - {{ sls_cert_managed }}
 
 Vault is running:
   service.running:
@@ -17,3 +19,4 @@ Vault is running:
     - reload: true
     - watch:
       - sls: {{ sls_config_file }}
+      - sls: {{ sls_cert_managed }}
