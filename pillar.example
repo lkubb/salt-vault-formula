@@ -48,6 +48,9 @@ vault:
     #           # these are parameters for vault_db.role_present
     #         <role_param>: <role_param_val>
   database: {}
+    # Automatically open relevant ports.
+    # Supported on RedHat family only currently.
+  manage_firewall: true
     # PKI backend management
   pki:
       # List of intermediate CAs to generate. List items are kwargs

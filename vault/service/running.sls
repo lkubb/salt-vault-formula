@@ -20,3 +20,24 @@ Vault is running:
     - watch:
       - sls: {{ sls_config_file }}
       - sls: {{ sls_cert_managed }}
+
+{%- if vault.manage_firewall and grains["os_family"] == "RedHat" %}
+{%-   set api_port = (vault | traverse("config:listener:tcp:address", ":8200")).split(":") | last | int %}
+
+Vault service is known:
+  firewalld.service:
+    - name: vault
+    - ports:
+      - {{ api_port }}/tcp
+      - {{ (vault | traverse("config:listener:tcp:cluster_address", ":" ~ (api_port + 1))).split(":") | last }}/tcp
+    - require:
+      - Vault is running
+
+Vault ports are open:
+  firewalld.present:
+    - name: public
+    - services:
+      - vault
+    - require:
+      - Vault service is known
+{%- endif %}

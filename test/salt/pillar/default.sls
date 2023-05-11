@@ -42,6 +42,7 @@ vault:
     pgp_keys: []
     root_token_pgp_key: null
     vault_addr: null
+  manage_firewall: true
   pki:
     ca: []
     roles_absent: []
