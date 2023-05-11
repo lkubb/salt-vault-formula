@@ -17,8 +17,11 @@ include:
 Vault key/cert is absent:
   file.absent:
     - names:
-      - {{ vault.cert.path_key }}
-      - {{ vault.cert.path_cert }}
+      - {{ vault.lookup.paths.api_key }}
+      - {{ vault.lookup.paths.api_cert }}
+      - {{ vault.lookup.paths.client_key }}
+      - {{ vault.lookup.paths.client_cert }}
+      - {{ vault.lookup.paths.ca_cert }}
     - require:
       - sls: {{ sls_service_clean }}
 {%- endif %}
