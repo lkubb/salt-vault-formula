@@ -810,7 +810,7 @@ def cleanup_auth():
     return {"deleted": ret}
 
 
-def clear_cache():
+def clear_cache(master=True, minions=True):
     """
     Clears master cache of Vault-specific data. This can include:
     - AppRole metadata
@@ -823,11 +823,29 @@ def clear_cache():
     .. code-block:: bash
 
         salt-run vault.clear_cache
+        salt-run vault.clear_cache minions=False
+        salt-run vault.clear_cache minions='[minion1, minion2]'
+
+    master
+        Clear cached data for the master context.
+        Includes cached master authentication data and KV metadata.
+        Defaults to true.
+
+    minions
+        Clear cached data for minions on the master.
+        Can include cached authentication credentials and KV metadata
+        for pillar compilation as well as AppRole metadata and
+        rendered policies for credential issuance.
+        Defaults to true. Set this to a list of minion IDs to only clear
+        cached data pertaining to thse minions.
     """
     cache = salt.cache.factory(__opts__)
-    cache.flush("vault")
-    for minion in cache.list("minions"):
-        cache.flush(f"minions/{minion}/vault")
+    if master:
+        cache.flush("vault")
+    if minions:
+        for minion in cache.list("minions"):
+            if minions is True or minion in minions:
+                cache.flush(f"minions/{minion}/vault")
 
 
 def _config(key=None, default=vault.VaultException):
