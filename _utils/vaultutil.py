@@ -477,7 +477,13 @@ def clear_cache(
                         if delta is True:
                             delta = 1
                         client.token_revoke(delta)
-                    if config["cache"]["expire_events"]:
+                    # Don't send expiry events for pillar compilation impersonation
+                    if (
+                        config["cache"]["expire_events"]
+                        and not force_local
+                        and _get_salt_run_type(opts)
+                        != SALT_RUNTYPE_MASTER_IMPERSONATING
+                    ):
                         scope = cbank.split("/")[-1]
                         _get_event(opts)(tag=f"vault/cache/{scope}/clear")
             except Exception as err:  # pylint: disable=broad-except
