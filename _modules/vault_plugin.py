@@ -7,6 +7,7 @@ but for ease of maintenance it is currently separate.
 
 import logging
 
+import salt.utils.versions
 import vaultutil as vault
 from salt.exceptions import (CommandExecutionError, SaltException,
                              SaltInvocationError)
@@ -73,7 +74,7 @@ def list_all():
         raise CommandExecutionError("{}: {}".format(type(err).__name__, err)) from err
 
 
-def show(plugin_type, plugin_name):
+def show(plugin_type, plugin_name, filter_sha=None, filter_version=None):
     """
     Show information about a specific plugin.
 
@@ -96,15 +97,87 @@ def show(plugin_type, plugin_name):
 
     plugin_name
         The name of the plugin to show.
+
+    filter_sha
+        The registered SHA256 hash of the plugin to filter for. Optional.
+        This might be necessary to account for the detailed endpoints not
+        listing versioned plugins.
+
+    filter_version
+        The registered plugin version to filter for. Optional.
+        This might be necessary to account for the detailed endpoints not
+        listing versioned plugins.
+
+    strict
+        Only return results matching the filters exactly. Defaults to true.
+        If false, will return other plugin versions or hashes in case the
+        queried one is not available. By default, tries to return the
+        highest version available.
     """
     _check_type(plugin_type)
+    if filter_version:
+        filter_version = filter_version.lstrip("v")
     try:
-        return vault.query(
+        plugin = vault.query(
             "GET",
             f"sys/plugins/catalog/{plugin_type}/{plugin_name}",
             __opts__,
             __context__,
         )["data"]
+        if (filter_sha and plugin["sha256"] != filter_sha) or (
+            filter_version and plugin["version"].lstrip("v") != filter_version
+        ):
+            raise vault.VaultNotFoundError()
+        return plugin
+    except vault.VaultNotFoundError:
+        # versioned plugins are not listed in the type-specific endpoints
+        try:
+            plugins = list_all()
+            matches = []
+            for plugin in plugins["detailed"]:
+                if plugin["name"] == plugin_name and plugin["type"] == plugin_type:
+                    matches.append(plugin)
+            if matches:
+                best = None
+                # Filter for the best-matching or highest version to return
+                for plugin in matches:
+                    if plugin["sha256"] == filter_sha:
+                        best = plugin
+                        break
+                    if best is None:
+                        best = plugin
+                        continue
+                    if not filter_version:
+                        pass
+                    elif plugin["version"].lstrip("v") == filter_version:
+                        if best["version"].lstrip("v") != filter_version:
+                            best = plugin
+                        continue
+                    elif best["version"].lstrip("v") == filter_version:
+                        continue
+                    curr_version = (
+                        plugin["version"].split("+", maxsplit=1)[0].lstrip("v")
+                    )
+                    best_version = best["version"].split("+", maxsplit=1)[0].lstrip("v")
+                    if not curr_version:
+                        continue
+                    if not best_version:
+                        best = plugin
+                        continue
+                    if salt.utils.versions.version_cmp(curr_version, best_version) > 0:
+                        best = plugin
+                # This endpoint does not behave the same way as the specific one,
+                # so emulate it. It's not ideal.
+                if "args" not in best:
+                    best["args"] = []
+                if "command" not in best:
+                    best["command"] = best["name"]
+                    return best
+            raise vault.VaultNotFoundError()
+        except SaltException as err:
+            raise CommandExecutionError(
+                "{}: {}".format(type(err).__name__, err)
+            ) from err
     except SaltException as err:
         raise CommandExecutionError("{}: {}".format(type(err).__name__, err)) from err
 

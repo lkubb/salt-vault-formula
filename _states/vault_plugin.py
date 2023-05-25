@@ -46,7 +46,12 @@ def registered(
     try:
         changes = {}
         try:
-            current = __salt__["vault_plugin.show"](plugin_type, name)
+            # Filtering for the sha and version is a workaround for the Vault API
+            # currently being suboptimal regarding versioned plugins – they are not listed
+            # in the type-specific endpoints.
+            current = __salt__["vault_plugin.show"](
+                plugin_type, name, filter_sha=sha256, filter_version=version
+            )
             if current["sha256"] != sha256:
                 changes["hash"] = {"old": current["sha256"], "new": sha256}
             if command is not None and current["command"] != command:
