@@ -1,5 +1,6 @@
 # vim: ft=yaml
 # yamllint disable rule:comments-indentation
+# yamllint disable rule:line-length
 ---
 vault:
     # Parameters for certificate generation via x509 module.
@@ -64,17 +65,30 @@ vault:
     roles_present: []
       # List of parameters to `vault_pki.urls_set`
     urls: []
-    # List of plugins to pull and register. Example:
-  #   - name: influxdb2-database-plugin
-  #     source: salt://vault/files/plugins/influxdb2-database-plugin_0.0.2_linux_amd64
-  #     hash: cafebabe1337d00ddeadbeefcafebabe1337d00ddeadbeefcafebabe1337d00d
-  #     type: database
-  #     version: 0.0.2
+    # List of plugins to pull and register.
   plugins: []
-    # List of plugins to ensure are absent. Example:
+    # Example:
+    # Required:
+  #   - name: influxdb2-database-plugin
+  #     source: https://git.my.name/vault/influxdb2-database-plugin/releases/0.0.2/influxdb2-database-plugin_0.0.2_linux_amd64
+  #     hash: https://git.my.name/vault/influxdb2-database-plugin/releases/0.0.2/SHA256
+  #     type: database
+    # Optional for pulling (currently requires my updated gpg and file modules):
+  #     keyring: /my/custom/keyring.gpg
+  #     gnupghome: /my/custom/gnupghome.gpg
+  #     signature: https://git.my.name/vault/influxdb2-database-plugin/releases/0.0.2/influxdb2-database-plugin_0.0.2_linux_amd64.sig
+  #     source_hash_sig: https://git.my.name/vault/influxdb2-database-plugin/releases/0.0.2/SHA256.sig
+    # Optional for registration:
+  #     args:
+  #       - argument
+  #     env:
+  #       - envvar=envval
+  #     version: 0.0.2
+    # List of plugins to ensure are absent.
+  plugins_absent: []
+    # Example:
   #   - name: influxdb2-database-plugin
   #     type: database
-  plugins_absent: []
     # When applying `clean` states, do not prevent accidental data loss
   remove_all_data_for_sure: false
     # `version` parameter for `pkg.installed`

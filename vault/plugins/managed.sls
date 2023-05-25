@@ -14,6 +14,11 @@ Vault plugin {{ plugin.name }} is present:
     - name: {{ vault.config.plugin_directory | path_join(plugin.name) }}
     - source: {{ plugin.source | json }}
     - source_hash: {{ plugin.hash }}
+{%- for param in ["source_hash_sig", "signature", "signed_by_any", "signed_by_all", "keyring", "gnupghome"] %}
+{%-   if plugin.get(param) %}
+    - {{ param }}: {{ plugin[param] | json }}
+{%-   endif %}
+{%- endfor %}
     - makedirs: true
     - mode: '0740'
     - dir_mode: '0750'
