@@ -21,6 +21,9 @@ import requests
 import salt.cache
 import salt.crypt
 import salt.exceptions
+import salt.modules.publish
+import salt.modules.saltutil
+import salt.utils.context
 import salt.utils.data
 import salt.utils.dictupdate
 import salt.utils.event
@@ -40,9 +43,6 @@ except ImportError:
 log = logging.getLogger(__name__)
 logging.getLogger("requests").setLevel(logging.WARNING)
 
-
-# Make __salt__ available globally to avoid loading minion_mods multiple times
-__salt__ = {}
 
 TOKEN_CKEY = "__token"
 CLIENT_CKEY = "_vault_authd_client"
@@ -485,7 +485,9 @@ def clear_cache(
                         != SALT_RUNTYPE_MASTER_IMPERSONATING
                     ):
                         scope = cbank.split("/")[-1]
-                        _get_event(opts)(tag=f"vault/cache/{scope}/clear")
+                        _get_event(opts)(
+                            data={"scope": scope}, tag=f"vault/cache/{scope}/clear"
+                        )
             except Exception as err:  # pylint: disable=broad-except
                 log.error(
                     "Failed to revoke token or send event before clearing cache:\n"
@@ -920,7 +922,7 @@ def _get_connection_config(
     if pre_flush and update:
         raise VaultException("`pre_flush` and `update` are mutually exclusive")
     log.debug("Using Vault server connection configuration from remote.")
-    config_cache = _get_config_cache(opts, context, cbank, "config")
+    config_cache = _get_config_cache(opts, context, cbank)
     if pre_flush:
         # ensure any cached data is tried when building a client for revocation
         config_cache.ttl = None
@@ -1257,10 +1259,6 @@ def _query_master(
         result.pop("misc_data", None)
         return result, unwrap_client
 
-    global __salt__  # pylint: disable=global-statement
-    if not __salt__:
-        __salt__ = salt.loader.minion_mods(opts)
-
     minion_id = opts["grains"]["id"]
     pki_dir = opts["pki_dir"]
 
@@ -1280,9 +1278,12 @@ def _query_master(
             ("impersonated_by_master", False),
         ] + list(kwargs.items())
 
-        result = __salt__["publish.runner"](
-            f"vault.{func}", arg=[{"__kwarg__": True, k: v} for k, v in arg]
-        )
+        with salt.utils.context.func_globals_inject(
+            salt.modules.publish.runner, __opts__=opts
+        ):
+            result = salt.modules.publish.runner(
+                f"vault.{func}", arg=[{"__kwarg__": True, k: v} for k, v in arg]
+            )
     else:
         private_key = f"{pki_dir}/master.pem"
         log.debug(
@@ -1292,13 +1293,16 @@ def _query_master(
             private_key,
         )
         signature = base64.b64encode(salt.crypt.sign_message(private_key, minion_id))
-        result = __salt__["saltutil.runner"](
-            f"vault.{func}",
-            minion_id=minion_id,
-            signature=signature,
-            impersonated_by_master=True,
-            **kwargs,
-        )
+        with salt.utils.context.func_globals_inject(
+            salt.modules.saltutil.runner, __opts__=opts
+        ):
+            result = salt.modules.saltutil.runner(
+                f"vault.{func}",
+                minion_id=minion_id,
+                signature=signature,
+                impersonated_by_master=True,
+                **kwargs,
+            )
     return check_result(
         result,
         unwrap_client=unwrap_client,
@@ -1307,13 +1311,13 @@ def _query_master(
 
 
 def _get_event(opts):
-    if opts.get("__role") == "master":
-        return salt.utils.event.get_master_event(opts, opts["sock_dir"]).fire_event
+    event = salt.utils.event.get_event(
+        opts.get("__role", "minion"), sock_dir=opts["sock_dir"], opts=opts, listen=False
+    )
 
-    global __salt__  # pylint: disable=global-statement
-    if not __salt__:
-        __salt__ = salt.loader.minion_mods(opts)
-    return __salt__["event.send"]
+    if opts.get("__role", "minion") == "minion":
+        return event.fire_master
+    return event.fire_event
 
 
 def parse_config(config, validate=True, opts=None, require_token=True):
@@ -1591,11 +1595,19 @@ class CACertHTTPSAdapter(requests.sessions.HTTPAdapter):
         self.ca_cert_data = ca_cert_data
         super().__init__(*args, **kwargs)
 
-    def init_poolmanager(self, *args, **kwargs):
+    def init_poolmanager(
+        self,
+        connections,
+        maxsize,
+        block=requests.adapters.DEFAULT_POOLBLOCK,
+        **pool_kwargs,
+    ):
         ssl_context = create_urllib3_context()
         ssl_context.load_verify_locations(cadata=self.ca_cert_data)
-        kwargs["ssl_context"] = ssl_context
-        return super().init_poolmanager(*args, **kwargs)
+        pool_kwargs["ssl_context"] = ssl_context
+        return super().init_poolmanager(
+            connections, maxsize, block=block, **pool_kwargs
+        )
 
 
 class VaultClient:
@@ -2754,7 +2766,7 @@ class VaultAuthCache(LeaseCacheMixin, CommonCache):
         return self._flush(ckey)
 
 
-def _get_config_cache(opts, context, cbank, ckey):
+def _get_config_cache(opts, context, cbank, ckey="config"):
     """
     Factory for VaultConfigCache to get around some
     chicken-and-egg problems
