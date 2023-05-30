@@ -46,8 +46,8 @@ Vault API certificate is managed:
     - subjectAltName:  {{ vault.cert.san | json }}
 {%-   else %}
     - subjectAltName:
-      - dns: {{ vault.cert.cn or grains.fqdns | reject("==", "localhost.localdomain") | first | d(grains.id) }}
-      - ip: {{ vault.cert.cn or grains.fqdns | reject("==", "localhost.localdomain") | first | d(grains.id) }}
+      - dns: {{ vault.cert.cn or ([grains.fqdn] + grains.fqdns) | reject("==", "localhost.localdomain") | first | d(grains.id) }}
+      - ip: {{ (grains.get("ip4_interfaces", {}).get("eth0", [""]) | first) or (grains.get("ipv4") | reject("==", "127.0.0.1") | first) }}
 {%-   endif %}
     - CN: {{ vault.cert.cn or grains.fqdns | reject("==", "localhost.localdomain") | first | d(grains.id) }}
     - mode: '0640'
@@ -98,8 +98,8 @@ Vault client certificate is managed:
     - subjectAltName:  {{ vault.cert.san | json }}
 {%-   else %}
     - subjectAltName:
-      - dns: {{ vault.cert.cn or grains.fqdns | reject("==", "localhost.localdomain") | first | d(grains.id) }}
-      - ip: {{ vault.cert.cn or grains.fqdns | reject("==", "localhost.localdomain") | first | d(grains.id) }}
+      - dns: {{ vault.cert.cn or ([grains.fqdn] + grains.fqdns) | reject("==", "localhost.localdomain") | first | d(grains.id) }}
+      - ip: {{ (grains.get("ip4_interfaces", {}).get("eth0", [""]) | first) or (grains.get("ipv4") | reject("==", "127.0.0.1") | first) }}
 {%-   endif %}
     - CN: {{ vault.cert.cn or grains.fqdns | reject("==", "localhost.localdomain") | first | d(grains.id) }}
     - mode: '0640'
