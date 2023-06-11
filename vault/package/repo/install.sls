@@ -2,7 +2,6 @@
 
 {%- set tplroot = tpldir.split("/")[0] %}
 {%- from tplroot ~ "/map.jinja" import mapdata as vault with context %}
-{%- from tplroot ~ "/libtofs.jinja" import files_switch with context %}
 
 {%- for reponame, enabled in vault.lookup.enablerepo.items() %}
 {%-   set config = vault.lookup.repos[reponame] %}

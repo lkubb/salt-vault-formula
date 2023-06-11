@@ -19,7 +19,7 @@ Vault API certificate private key is managed:
     - prereq:
       - Vault API certificate is managed
 {%-   endif %}
-    - makedirs: True
+    - makedirs: true
     - user: root
     - group: {{ vault.lookup.group }}
     - mode: '0640'
@@ -53,7 +53,7 @@ Vault API certificate is managed:
     - mode: '0640'
     - user: root
     - group: {{ vault.lookup.group }}
-    - makedirs: True
+    - makedirs: true
     - append_certs: {{ vault.cert.intermediate | json }}
     - require:
       - sls: {{ sls_package_install }}
@@ -71,7 +71,7 @@ Vault client certificate private key is managed:
     - prereq:
       - Vault client certificate is managed
 {%-   endif %}
-    - makedirs: True
+    - makedirs: true
     - user: root
     - mode: '0640'
     - group: {{ vault.lookup.group }}
@@ -105,7 +105,7 @@ Vault client certificate is managed:
     - mode: '0640'
     - user: root
     - group: {{ vault.lookup.group }}
-    - makedirs: True
+    - makedirs: true
     - append_certs: {{ vault.cert.intermediate | json }}
     - require:
       - sls: {{ sls_package_install }}

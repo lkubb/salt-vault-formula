@@ -51,6 +51,11 @@ values:
   plugins_absent: []
   remove_all_data_for_sure: false
   version: null
+  tofs:
+    files_switch:
+      - id
+      - roles
+      - os_family
   # Just here for testing
   added_in_defaults: defaults_value
   winner: defaults

@@ -2,7 +2,7 @@
 
 {%- set tplroot = tpldir.split("/")[0] %}
 {%- from tplroot ~ "/map.jinja" import mapdata as vault with context %}
-{%- from tplroot ~ "/libtofs.jinja" import files_switch with context %}
+{%- from tplroot ~ "/libtofsstack.jinja" import files_switch with context %}
 
 include:
   - {{ slsdotpath }}.repo
@@ -19,14 +19,16 @@ Vault is installed:
 Vault service overrides are installed:
   file.managed:
     - name: /etc/systemd/system/vault.service.d/salt.conf
-    - source: {{ files_switch(["service_override.conf", "service_override.conf.j2"],
-                              lookup="Vault service overrides are installed",
+    - source: {{ files_switch(
+                    ["service_override.conf", "service_override.conf.j2"],
+                    config=vault,
+                    lookup="Vault service overrides are installed",
                  )
               }}
     - mode: '0644'
     - user: root
     - group: {{ vault.lookup.rootgroup }}
-    - makedirs: True
+    - makedirs: true
     - template: jinja
     - require:
       - Vault is installed

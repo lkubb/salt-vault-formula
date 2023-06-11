@@ -2,7 +2,7 @@
 
 {#-
     Removes Vault and service unit overrides.
-    Has a depency on `vault.config.clean`_.
+    Has a dependency on `vault.config.clean`_.
 #}
 
 {%- set tplroot = tpldir.split("/")[0] %}

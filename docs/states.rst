@@ -46,21 +46,16 @@ Manages system settings required for Vault: disable swap.
 Includes `vault.package`_.
 
 
-``vault.service``
-^^^^^^^^^^^^^^^^^
-Starts the vault service and enables it at boot time.
-Has a dependency on `vault.config`_.
-
-
 ``vault.cert``
 ^^^^^^^^^^^^^^
 Generates a TLS certificate + key for Vault.
 Depends on `vault.package`_.
 
 
-``vault.database``
-^^^^^^^^^^^^^^^^^^
-Manages database connections and their roles.
+``vault.service``
+^^^^^^^^^^^^^^^^^
+Starts the vault service and enables it at boot time.
+Has a dependency on `vault.config`_.
 
 
 ``vault.initialize``
@@ -69,6 +64,11 @@ Ensures a running Vault cluster has been initialized.
 Will output key shares and initial root token to file paths.
 **Ensure you provide the correct GPG keys in order to encrypt
 the output.**
+
+
+``vault.database``
+^^^^^^^^^^^^^^^^^^
+Manages database connections and their roles.
 
 
 ``vault.pki``
@@ -111,7 +111,7 @@ uninstalls the package.
 ``vault.package.clean``
 ^^^^^^^^^^^^^^^^^^^^^^^
 Removes Vault and service unit overrides.
-Has a depency on `vault.config.clean`_.
+Has a dependency on `vault.config.clean`_.
 
 
 ``vault.package.repo.clean``
@@ -126,15 +126,15 @@ Removes the Vault configuration only and has a
 dependency on `vault.service.clean`_.
 
 
-``vault.service.clean``
-^^^^^^^^^^^^^^^^^^^^^^^
-Stops the vault service and disables it at boot time.
-
-
 ``vault.cert.clean``
 ^^^^^^^^^^^^^^^^^^^^
 Removes generated Vault TLS certificate + key.
 Depends on `vault.service.clean`_.
+
+
+``vault.service.clean``
+^^^^^^^^^^^^^^^^^^^^^^^
+Stops the vault service and disables it at boot time.
 
 
 ``vault.database.clean``
