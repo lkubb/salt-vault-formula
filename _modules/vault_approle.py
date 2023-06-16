@@ -22,7 +22,7 @@ def list_(mount="approle"):
 
     .. code-block:: bash
 
-        salt '*' vault_approle.list_
+        salt '*' vault_approle.list
 
     Required policy:
 
