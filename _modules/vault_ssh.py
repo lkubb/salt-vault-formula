@@ -690,7 +690,7 @@ def read_ca(mount="ssh"):
         raise CommandExecutionError(f"{type(err).__name__}: {err}") from err
     try:
         res = vault.query_raw(
-            "GET", f"{mount}/config/ca", __opts__, __context__, is_unauthd=True
+            "GET", f"{mount}/public_key", __opts__, __context__, is_unauthd=True
         )
     except vault.VaultException as err:
         raise CommandExecutionError(f"{type(err).__name__}: {err}") from err
