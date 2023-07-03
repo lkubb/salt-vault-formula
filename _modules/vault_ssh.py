@@ -900,6 +900,194 @@ def generate_key_cert(
         raise CommandExecutionError(f"{type(err).__name__}: {err}") from err
 
 
+def create_certificate(
+    ca_server=None,
+    signing_policy=None,
+    path=None,
+    overwrite=False,
+    raw=False,
+    **kwargs,
+):
+    """
+    Create an OpenSSH certificate and return an encoded version of it.
+    This is a compatibility layer between ``ssh_pki.certificate_managed``
+    and this module, hence the parameter names do not match their expected
+    value sometimes.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' vault_ssh.create_certificate signing_private_key='/etc/pki/ssh/myca.key'
+
+    ca_server
+        The name of the mount point the SSH secret backend is mounted at.
+
+    signing_policy
+        The name of the SSH role to use for issuance. Required.
+
+    cert_type
+        The certificate type to generate. Either ``user`` or ``host``.
+        Required if not specified in the Vault role.
+
+    private_key
+        The private key corresponding to the public key the certificate should
+        be issued for. Either this or ``public_key`` is required.
+
+    private_key_passphrase
+        If ``private_key`` is specified and encrypted, the passphrase to decrypt it.
+
+    public_key
+        The public key the certificate should be issued for.
+        Either this or ``public_key`` is required.
+
+    days_valid
+        If ``not_after`` is unspecified, the number of days from the time of issuance
+        the certificate should be valid for. Defaults to ``30`` for host certificates
+        and ``1`` for client certificates.
+
+    critical_options
+        A mapping of critical option name to option value to set on the certificate.
+        If an option does not take a value, specify it as ``true``.
+
+    extensions
+        A mapping of extension name to extension value to set on the certificate.
+        If an extension does not take a value, specify it as ``true``.
+
+    valid_principals
+        A list of valid principals.
+
+    all_principals
+        Allow any principals. Defaults to false.
+    """
+    ignored_params = (
+        "signing_private_key",
+        "signing_private_key_passphrase",
+        "serial_number",
+        "not_before",
+        "not_after",
+        "copypath",
+        "path",
+        "overwrite",
+        "raw",
+    )
+    for ignored in ignored_params:
+        if kwargs.get(ignored) is not None:
+            log.warning(
+                f"Ignoring '{ignored}', this cannot be set for the Vault backend"
+            )
+            kwargs.pop(ignored)
+    if not kwargs.get("private_key") and not kwargs.get("public_key"):
+        raise SaltInvocationError(
+            "Need a valid public key source, either 'private_key' or 'public_key'"
+        )
+    if kwargs.get("valid_principals"):
+        kwargs["valid_principals"] = ",".join(kwargs["valid_principals"])
+    elif kwargs.get("all_principals"):
+        kwargs["valid_principals"] = "*"
+    else:
+        raise SaltInvocationError(
+            "Either valid_principals or all_principals must be specified"
+        )
+    if not signing_policy:
+        raise SaltInvocationError(
+            "Need 'signing_policy' specified, which actually refers to a role name"
+        )
+
+    ttl = kwargs.get("ttl")
+    if ttl is None and kwargs.get("days_valid"):
+        # hours is the largest suffix apparently
+        ttl = f"{kwargs['days_valid'] * 24}h"
+
+    pubkey = __salt__["ssh_pki.get_public_key"](
+        kwargs.get("private_key") or kwargs.get("public_key")
+    )
+    ca_server = ca_server or "ssh"
+
+    return sign_key(
+        signing_policy,
+        pubkey,
+        ttl=ttl,
+        valid_principals=kwargs.get("valid_principals"),
+        cert_type=kwargs.get("cert_type"),
+        key_id=kwargs.get("key_id"),
+        critical_options=kwargs.get("critical_options"),
+        extensions=kwargs.get("extensions"),
+        mount=ca_server,
+    )["signed_key"]
+
+
+def get_signing_policy(signing_policy, ca_server=None):
+    """
+    Returns an SSH role formatted as a signing policy.
+    Compatibility layer between ``ssh_pki`` and this module.
+    This currently does not support all functionality Vault offers,
+    e.g. dynamic principals (templates/allow_subdomains) or allowed
+    extensions/options, so ``ssh_pki.certificate_managed`` might always
+    reissue a certificate in case these options are used.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' vault_ssh.get_signing_policy www
+
+    signing_policy
+        The name of the SSH role to return.
+
+    ca_server
+        The name of the mount point the SSH secret backend is mounted at.
+    """
+    ca_server = ca_server or "ssh"
+    role = read_role(signing_policy, mount=ca_server)
+    if role["key_type"] != "ca":
+        raise SaltInvocationError("The specified Vault role is not a CA role")
+    policy = {"allowed_valid_principals": []}
+
+    if role.get("allow_host_certificates"):
+        if role.get("allowed_domains_template") or role.get("allow_subdomains"):
+            # Patterns are unsupported by the current ssh_pki modules.
+            # Ensure the certificate is not always recreated.
+            allowed_domains = ["*"]
+        else:
+            allowed_domains = role.get("allowed_domains", "").split(",")
+        policy["allowed_valid_principals"].extend(allowed_domains)
+
+    if role.get("allow_user_certificates"):
+        if role.get("allowed_users_template"):
+            # Patterns are unsupported by the current ssh_pki modules.
+            # Ensure the certificate is not always recreated.
+            allowed_users = ["*"]
+        else:
+            allowed_users = role.get("allowed_users", "").split(",")
+        policy["allowed_valid_principals"].extend(allowed_users)
+
+    if "*" in policy["allowed_valid_principals"]:
+        policy.pop("allowed_valid_principals")
+        policy["all_principals"] = True
+
+    policy["allowed_critical_options"] = role.get("allowed_critical_options", "").split(
+        ","
+    )
+    policy["allowed_extensions"] = role.get("allowed_critical_options", "").split(",")
+    policy["default_critical_options"] = role.get("default_critical_options", {})
+    policy["default_extensions"] = role.get("default_extensions", {})
+    policy["default_valid_principals"] = (
+        [role["default_user"]] if "default_user" in role else []
+    )
+
+    if role.get("ttl"):
+        policy["ttl"] = role["ttl"] or None
+    if role.get("max_ttl"):
+        policy["max_ttl"] = role["max_ttl"]
+
+    if not role.get("allow_user_key_ids"):
+        policy["key_id"] = None
+
+    policy["signing_public_key"] = read_ca(mount=ca_server)
+    return policy
+
+
 def _get_file_or_data(data):
     """
     Try to load a string as a file, otherwise return the string
@@ -909,6 +1097,6 @@ def _get_file_or_data(data):
     try:
         if Path(data).is_file():
             return Path(data).read_text()
-    except (TypeError, ValueError):
+    except (OSError, TypeError, ValueError):
         pass
     return data
