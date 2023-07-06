@@ -183,7 +183,6 @@ def write_role(
     allow_host_certificates
         Allow certificates to be signed for ``host`` use. Defaults to false.
 
-
     allow_bare_domains
         Allow host certificates to be signed for the base domains listed in
         ``allowed_domains``. This is a separate option as in some cases this
@@ -554,7 +553,6 @@ def create_ca(
     public_key=None,
     key_type="ssh-rsa",
     key_bits=0,
-    force=False,
     mount="ssh",
 ):
     """
