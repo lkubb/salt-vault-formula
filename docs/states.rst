@@ -97,6 +97,21 @@ Manages present/absent custom plugins.
 For present ones, pulls binaries from a URI and registers them.
 
 
+``vault.ssh``
+^^^^^^^^^^^^^
+Manages SSH secret backend roles and, if required, CAs.
+
+
+``vault.ssh.ca``
+^^^^^^^^^^^^^^^^
+
+
+
+``vault.ssh.roles``
+^^^^^^^^^^^^^^^^^^^
+
+
+
 ``vault.clean``
 ^^^^^^^^^^^^^^^
 *Meta-state*.
@@ -152,5 +167,12 @@ Does nothing at the moment.
 ``vault.plugins.clean``
 ^^^^^^^^^^^^^^^^^^^^^^^
 
+
+
+``vault.ssh.clean``
+^^^^^^^^^^^^^^^^^^^
+Removes managed SSH roles and SSH CAs.
+For CAs, requires ``remove_all_data_for_sure`` to be set to true
+to prevent accidental damage.
 
 

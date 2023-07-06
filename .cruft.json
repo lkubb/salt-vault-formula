@@ -70,7 +70,8 @@
         },
         "plugins": [],
         "plugins_absent": [],
-        "remove_all_data_for_sure": false
+        "remove_all_data_for_sure": false,
+        "ssh": {}
       },
       "_template": "https://github.com/lkubb/salt-template-formula"
     }

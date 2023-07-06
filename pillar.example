@@ -16,11 +16,14 @@ vault:
     signing_cert: null
     signing_policy: null
     signing_private_key: null
+
     # Will be serialized as JSON
   config: {}
+
     # Whether to ensure swap is disabled
   disable_swap: false
-    # Cluster initialization setting. Set this to false
+
+    # Cluster initialization settings. Set this to false
     # to disable automatic initialization.
   init:
       # Number of generated key shares
@@ -38,20 +41,26 @@ vault:
     root_token_pgp_key: null
       # HTTP(s) URI to connect to for cluster management
     vault_addr: null
-    # database backend management
-    # format:
-    # <mount_name>:
-    #   <connection_name>:
-    #       # these are parameters for vault_db.connection_present
-    #     <connection_param>: <connection_param_val>
-    #     roles:
-    #       <role_name>:
-    #           # these are parameters for vault_db.role_present
-    #         <role_param>: <role_param_val>
+
+    # Manage database secret backend mounts.
   database: {}
+  # Example:
+  ##########
+  # mysql:              # <mount_name>
+  #   galera_1:         # <connection_name>
+  #     plugin: mysql   # Parameters to `vault_db.connection_present`
+  #     connection_url: '{{username}}:{{password}}@tcp(galera.example.com:3306)/'
+  #     username: vault
+  #     password: correct horse battery staple
+  #     roles:
+  #       role_1:       # <role_name>
+  #         # ...       # Parameters to `vault_db.role_present`
+  ##########
+
     # Automatically open relevant ports.
     # Supported on RedHat family only currently.
   manage_firewall: true
+
     # PKI backend management
   pki:
       # List of intermediate CAs to generate. List items are kwargs
@@ -65,32 +74,66 @@ vault:
     roles_present: []
       # List of parameters to `vault_pki.urls_set`
     urls: []
+
     # List of plugins to pull and register.
   plugins: []
-    # Example:
-    # Required:
-  #   - name: influxdb2-database-plugin
-  #     source: https://git.my.name/vault/influxdb2-database-plugin/releases/0.0.2/influxdb2-database-plugin_0.0.2_linux_amd64
-  #     hash: https://git.my.name/vault/influxdb2-database-plugin/releases/0.0.2/SHA256
-  #     type: database
-    # Optional for pulling (currently requires my updated gpg and file modules):
-  #     keyring: /my/custom/keyring.gpg
-  #     gnupghome: /my/custom/gnupghome.gpg
-  #     signature: https://git.my.name/vault/influxdb2-database-plugin/releases/0.0.2/influxdb2-database-plugin_0.0.2_linux_amd64.sig
-  #     source_hash_sig: https://git.my.name/vault/influxdb2-database-plugin/releases/0.0.2/SHA256.sig
-    # Optional for registration:
-  #     args:
-  #       - argument
-  #     env:
-  #       - envvar=envval
-  #     version: 0.0.2
+  # Example:
+  ##########
+  # Required:
+  # --------
+  # - name: influxdb2-database-plugin
+  #   source: https://git.my.name/vault/influxdb2-database-plugin/releases/0.0.2/influxdb2-database-plugin_0.0.2_linux_amd64
+  #   hash: https://git.my.name/vault/influxdb2-database-plugin/releases/0.0.2/SHA256
+  #   type: database
+  ##########
+  # Optional for pulling (currently requires my updated gpg and file modules):
+  # --------
+  #   keyring: /my/custom/keyring.gpg
+  #   gnupghome: /my/custom/gnupghome.gpg
+  #   signature: https://git.my.name/vault/influxdb2-database-plugin/releases/0.0.2/influxdb2-database-plugin_0.0.2_linux_amd64.sig
+  #   source_hash_sig: https://git.my.name/vault/influxdb2-database-plugin/releases/0.0.2/SHA256.sig
+  ##########
+  # Optional for registration:
+  # --------
+  #   args:
+  #     - argument
+  #   env:
+  #     - envvar=envval
+  #   version: 0.0.2
+  ##########
+
     # List of plugins to ensure are absent.
   plugins_absent: []
-    # Example:
-  #   - name: influxdb2-database-plugin
-  #     type: database
+  # Example:
+  ##########
+  # - name: influxdb2-database-plugin
+  #   type: database
+  ##########
+
     # When applying `clean` states, do not prevent accidental data loss
   remove_all_data_for_sure: false
+
+    # Manage SSH secret backend mounts. This should be a map of
+    # mount name to mount configuration.
+    # The mount configuration can have three keys, `ca`, `roles` and `roles_absent`.
+    # `ca` specifies parameters for `vault_ssh.ca_present`,
+    # `roles` is a mapping of role names to parameters to `vault_ssh.role_present`,
+    # `roles_absent` is a list of roles that should not be present on the mount.
+  ssh: {}
+  # Example:
+  ##########
+  # ssh_host:
+  #   ca:
+  #     key_type: ed25519
+  #   roles:
+  #     host:
+  #       key_type: ca
+  #       allowed_domains:
+  #         - example.com
+  #       allow_subdomains: true
+  #       allow_host_certificates: true
+  ##########
+
     # `version` parameter for `pkg.installed`
   version: null
 

@@ -51,6 +51,7 @@ vault:
   plugins: []
   plugins_absent: []
   remove_all_data_for_sure: false
+  ssh: {}
   version: null
 
   tofs:
