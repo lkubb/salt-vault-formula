@@ -101,7 +101,8 @@ def get(key, profile=None):
     """
     full_path = key
     if "?" in key:
-        path, key = key.split("?")
+        path, key = key.rsplit("?", 1)
+        full_path = None
     else:
         path, key = key.rsplit("/", 1)
 
@@ -111,10 +112,13 @@ def get(key, profile=None):
             if key in res:
                 return res[key]
             return None
-        except vault.VaultNotFoundError:
-            return vault.read_kv(full_path, __opts__, __context__)
-    except vault.VaultNotFoundError:
-        return None
+        except (vault.VaultNotFoundError, vault.VaultPermissionDeniedError) as err:
+            if not full_path:
+                raise
+            try:
+                return vault.read_kv(full_path, __opts__, __context__)
+            except (vault.VaultNotFoundError, vault.VaultPermissionDeniedError):
+                raise err
     except Exception as err:  # pylint: disable=broad-except
         log.error("Failed to read secret! %s: %s", type(err).__name__, err)
         raise salt.exceptions.CommandExecutionError(err) from err
