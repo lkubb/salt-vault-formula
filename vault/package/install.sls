@@ -39,4 +39,4 @@ Custom Vault modules are present:
   saltutil.sync_all:
     - refresh: true
     - unless:
-      - {{ "vault_server" in salt["saltutil.list_extmods"]().get("states", []) | lower }}
+      - '{{ ("vault_server" in salt["saltutil.list_extmods"]().get("states", [])) | lower }}'
