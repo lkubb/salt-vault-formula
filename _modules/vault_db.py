@@ -7,6 +7,7 @@ Configuration instructions are documented in the :ref:`vault execution module do
 """
 
 import logging
+from datetime import datetime, timezone
 
 import vaultutil as vault
 from salt.exceptions import CommandExecutionError, SaltInvocationError
@@ -757,14 +758,53 @@ def clear_cached(
         Defaults to true.
     """
     creds_cache = vault.get_lease_store(__opts__, __context__)
-    ptrn = ["db"]
-    ptrn.append("*" if mount is None else mount)
-    ptrn.append("*" if static is None else "static" if static else "dynamic")
-    ptrn.append("*" if name is None else name)
-    ptrn.append("*" if cache is None else "default" if cache is True else cache)
     return creds_cache.revoke_cached(
-        match=".".join(ptrn), delta=delta, flush_on_failure=flush_on_failure
+        match=_create_cache_pattern(name=name, mount=mount, cache=cache, static=static),
+        delta=delta,
+        flush_on_failure=flush_on_failure,
     )
+
+
+def list_cached(name=None, mount=None, cache=None, static=None):
+    """
+    List cached database credentials matching specified parameters.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+            salt '*' vault_db.list_cached name=myrole mount=database
+            salt '*' vault_db.list_cached mount=database
+            salt '*' vault_db.list_cached
+
+    name
+        Only list credentials using this role name.
+
+    mount
+        Only list credentials from this mount.
+
+    cache
+        Only list credentials using this cache name (refer to get_creds for details).
+
+    static
+        Only list static (``True``) or dynamic (``False``) credentials.
+    """
+    creds_cache = vault.get_lease_store(__opts__, __context__)
+    info = creds_cache.list_info(
+        match=_create_cache_pattern(name=name, mount=mount, cache=cache, static=static)
+    )
+    for lease in info.values():
+        for val in ("creation_time", "expire_time"):
+            if val in lease:
+                if val == "expire_time":
+                    lease["expires_in"] = int(
+                        lease[val] - datetime.utcnow().timestamp()
+                    )
+                    lease["expired"] = not (lease["expires_in"] > 0)
+                lease[val] = datetime.fromtimestamp(
+                    lease[val], tz=timezone.utc
+                ).strftime("%Y-%m-%d %H:%M:%S")
+    return info
 
 
 def renew_cached(name=None, mount=None, cache=None, static=None, increment=None):
@@ -798,12 +838,10 @@ def renew_cached(name=None, mount=None, cache=None, static=None, increment=None)
         Can be an integer (seconds) or a time string like ``1h``. Optional.
     """
     creds_cache = vault.get_lease_store(__opts__, __context__)
-    ptrn = ["db"]
-    ptrn.append("*" if mount is None else mount)
-    ptrn.append("*" if static is None else "static" if static else "dynamic")
-    ptrn.append("*" if name is None else name)
-    ptrn.append("*" if cache is None else "default" if cache is True else cache)
-    return creds_cache.renew_cached(match=".".join(ptrn), increment=increment)
+    return creds_cache.renew_cached(
+        match=_create_cache_pattern(name=name, mount=mount, cache=cache, static=static),
+        increment=increment,
+    )
 
 
 def rotate_static_role(name, mount="database"):
@@ -847,3 +885,12 @@ def get_plugin_name(plugin):
     """
     plugin_name = PLUGINS.get(plugin, {"name": plugin})["name"]
     return f"{plugin_name}-database-plugin"
+
+
+def _create_cache_pattern(name=None, mount=None, cache=None, static=None):
+    ptrn = ["db"]
+    ptrn.append("*" if mount is None else mount)
+    ptrn.append("*" if static is None else "static" if static else "dynamic")
+    ptrn.append("*" if name is None else name)
+    ptrn.append("*" if cache is None else "default" if cache is True else cache)
+    return ".".join(ptrn)

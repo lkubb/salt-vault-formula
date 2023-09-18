@@ -2257,7 +2257,7 @@ class BaseLease(DurationMixin, DropInitKwargsMixin):
         """
         Return a dict of all contained attributes
         """
-        return self.__dict__
+        return copy.deepcopy(self.__dict__)
 
 
 class VaultLease(BaseLease):
@@ -3384,6 +3384,25 @@ class LeaseStore:
         """
         return self.cache.list()
 
+    def list_info(self, match="*"):
+        """
+        List cached leases.
+
+        match
+            Only list cached leases whose ckey matches this glob pattern.
+            Defaults to ``*``.
+        """
+        ret = {}
+        for ckey in self.list():
+            if not fnmatch.fnmatch(ckey, match):
+                continue
+            lease = self.cache.get(ckey, flush=False)
+            info = lease.to_dict()
+            # do not leak auth data
+            info.pop("data", None)
+            ret[ckey] = info
+        return ret
+
     def lookup(self, lease):
         """
         Lookup lease meta information.
@@ -3440,7 +3459,7 @@ class LeaseStore:
             return new_lease
         return ret
 
-    def renew_cached(self, match, increment=None):
+    def renew_cached(self, match="*", increment=None):
         """
         Renew cached leases.
 
