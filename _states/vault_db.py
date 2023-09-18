@@ -311,6 +311,11 @@ def role_present(
         for param, arg in diff_params:
             if arg is None:
                 continue
+            # Strip statements to avoid tripping over final newlines
+            if param.endswith("statements"):
+                arg = [x.rstrip() for x in arg]
+                if param in current:
+                    current[param] = [x.rstrip() for x in current[param]]
             if param not in current or current[param] != arg:
                 changed.update({param: {"old": current.get(param), "new": arg}})
         return changed
