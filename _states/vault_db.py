@@ -548,3 +548,230 @@ def static_role_present(
         ret["changes"] = {}
 
     return ret
+
+
+def creds_cached(
+    name,
+    static=False,
+    cache=None,
+    valid_for=None,
+    renew_increment=None,
+    revoke_delay=None,
+    meta=None,
+    mount="database",
+    **kwargs,
+):
+    """
+    Ensure valid credentials are present in the minion's cache based on the named role.
+    Supports ``mod_beacon``.
+
+    .. note::
+
+        This function is mosly intended to associate a specific credential with
+        a beacon that warns about expiry and allows to run an associated state to
+        reconfigure an application with new credentials.
+
+    name
+        The name of the database role.
+
+    static
+        Whether this role is static. Defaults to False.
+
+    cache
+        A variable cache suffix to be able to use multiple distinct credentials
+        using the same role on the same minion.
+        Ignored when ``static`` is true.
+
+        .. note::
+
+            This uses the same cache backend as the Vault integration, so make
+            sure you configure a persistent backend like ``disk`` if you expect
+            the credentials to survive a single run.
+
+    valid_for
+        Ensure the credentials are valid for at least this amount of time,
+        otherwise request new ones.
+        This can be an integer, which will be interpreted as seconds, or a time string
+        using the same format as Vault does:
+        Suffix ``s`` for seconds, ``m`` for minuts, ``h`` for hours, ``d`` for days.
+        Defaults to ``0``.
+
+    renew_increment
+        When using cache and ``valid_for`` results in a renewal attempt, request this
+        amount of time extension on the lease. This will be cached together with the
+        lease and might be used by other modules later.
+
+    revoke_delay
+        When using cache and ``valid_for`` results in a revocation, set the lease
+        validity to this value to allow a short amount of delay between the issuance
+        of the new lease and the revocation of the old one. Defaults to ``60``.
+        This will be cached together with the lease and might be used by other
+        modules later.
+
+    meta
+        When using cache, this value will be cached together with the lease. It will
+        be emitted by the ``vault_lease`` beacon module whenever a lease is
+        running out (usually because it cannot be extended further). It is intended
+        to support the reactor in deciding what needs to be done in order
+        to to reconfigure dependent, Vault-unaware software with newly issued
+        credentials. Entirely optional.
+
+    mount
+        The mount path the database backend is mounted to. Defaults to ``database``.
+    """
+    ret = {
+        "name": name,
+        "result": True,
+        "comment": "The credentials are already cached and valid",
+        "changes": {},
+    }
+
+    cached = __salt__["vault_db.list_cached"](
+        name, static=static, cache=cache, mount=mount
+    )
+    verb = "issue"
+    if cached:
+        info = cached[next(iter(cached))]
+        for attr, val in (
+            ("min_ttl", valid_for),
+            ("renew_increment", renew_increment),
+            ("revoke_delay", revoke_delay),
+            ("meta", meta),
+        ):
+            if val is not None and info.get(attr) != val:
+                # Not sure if meta-changes should actually be reported here
+                ret["changes"][attr] = {"old": info.get(attr), "new": val}
+                verb = "edite"
+        if info["expires_in"] <= vault.timestring_map(valid_for):
+            ret["changes"]["expiry"] = True
+            verb = "reissue"
+        if not ret["changes"]:
+            return ret
+    else:
+        ret["changes"]["new"] = True
+    if __opts__["test"]:
+        ret["result"] = None
+        ret["comment"] = f"The credentials would have been {verb}d"
+        return ret
+    __salt__["vault_db.get_creds"](
+        name,
+        static=static,
+        cache=cache or True,
+        valid_for=valid_for,
+        renew_increment=renew_increment,
+        revoke_delay=revoke_delay,
+        meta=meta,
+        mount=mount,
+        _warn_about_attr_change=False,
+    )
+    new_cached = __salt__["vault_db.list_cached"](
+        name, static=static, cache=cache, mount=mount
+    )
+    if not new_cached:
+        raise CommandExecutionError(
+            "Could not find cached credentials after issuing, this is likely a bug"
+        )
+    if verb == "reissue":
+        # Ensure the reporting is correct, usually the lease would
+        # just be renewed.
+        if new_cached[next(iter(cached))]["lease_id"] == info["lease_id"]:
+            verb = "renewe"
+
+    ret["comment"] = f"The credentials have been {verb}d"
+    return ret
+
+
+def creds_uncached(name, static=False, cache=None, mount="database", **kwargs):
+    """
+    Ensure credentials are absent in the minion's cache based on the named role.
+    Supports ``mod_beacon``.
+
+    .. note::
+
+        This function is mosly intended to associate a specific credential with
+        a beacon that warns about expiry and allows to run an associated state to
+        reconfigure an application with new credentials.
+
+    name
+        The name of the database role.
+
+    static
+        Whether this role is static. Defaults to False.
+
+    cache
+        A variable cache suffix to be able to use multiple distinct credentials
+        using the same role on the same minion.
+        Ignored when ``static`` is true.
+
+    mount
+        The mount path the database backend is mounted to. Defaults to ``database``.
+    """
+    ret = {
+        "name": name,
+        "result": True,
+        "comment": "No matching credentials present",
+        "changes": {},
+    }
+
+    cached = __salt__["vault_db.list_cached"](
+        name, static=static, cache=cache, mount=mount
+    )
+    if not cached:
+        return ret
+    ret["changes"]["revoked"] = True
+    if __opts__["test"]:
+        ret["result"] = None
+        ret["comment"] = "The credentials would have been revoked"
+        return ret
+    __salt__["vault_db.clear_cached"](
+        name, static=static, cache=cache or True, mount=mount
+    )
+    ret["comment"] = "The credentials have been revoked"
+    return ret
+
+
+def mod_beacon(name, sfun=None, static=False, cache=None, mount="database", **kwargs):
+    """
+    Associates a Vault lease with a ``vault_lease`` beacon and
+    possibly a state.
+
+    beacon_interval
+        The interval to run the beacon in. Defaults to 60.
+
+    min_ttl
+        If this minimum TTL on the lease is undercut, the beacon will
+        fire an event. Defaults to 0.
+    """
+    ret = {"name": name, "changes": {}, "result": True, "comment": ""}
+    supported_funcs = ["creds_cached", "creds_uncached"]
+
+    if sfun not in supported_funcs:
+        ret["result"] = False
+        ret["comment"] = f"'vault_db.{sfun}' does not work with mod_beacon"
+        return ret
+    if not kwargs.get("beacon"):
+        ret["comment"] = "Not managing beacon"
+        return ret
+    lease = __salt__["vault_db.create_cache_pattern"](
+        name, mount=mount, static=static, cache=cache
+    )
+    beacon_module = "vault_lease"
+    beacon_name = f"{beacon_module}_{lease}"
+    if sfun == "creds_uncached":
+        beacon_kwargs = {
+            "name": beacon_name,
+            "beacon_module": beacon_module,
+        }
+        bfun = "absent"
+    elif sfun == "creds_cached":
+        beacon_kwargs = {
+            "name": beacon_name,
+            "beacon_module": beacon_module,
+            "interval": kwargs.get("beacon_interval", 60),
+            "lease": lease,
+            "min_ttl": kwargs.get("min_ttl", 0),
+            "meta": kwargs.get("meta"),
+            "check_server": kwargs.get("check_server", False),
+        }
+        bfun = "present"
+    return __states__[f"beacon.{bfun}"](**beacon_kwargs)

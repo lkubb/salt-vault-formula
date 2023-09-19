@@ -655,7 +655,18 @@ def delete_role(name, static=False, mount="database"):
         raise CommandExecutionError(f"{err.__class__}: {err}") from err
 
 
-def get_creds(name, static=False, cache=True, valid_for=0, mount="database"):
+def get_creds(
+    name,
+    static=False,
+    cache=True,
+    valid_for=None,
+    check_server=False,
+    renew_increment=None,
+    revoke_delay=None,
+    meta=None,
+    mount="database",
+    _warn_about_attr_change=True,
+):
     """
     Read credentials based on the named role.
 
@@ -695,6 +706,32 @@ def get_creds(name, static=False, cache=True, valid_for=0, mount="database"):
         This can be an integer, which will be interpreted as seconds, or a time string
         using the same format as Vault does:
         Suffix ``s`` for seconds, ``m`` for minuts, ``h`` for hours, ``d`` for days.
+        This will be cached together with the lease and might be used by other
+        modules later.
+
+    check_server
+        Check on the Vault server whether the lease is still active and was not
+        revoked early. Defaults to false.
+
+    renew_increment
+        When using cache and ``valid_for`` results in a renewal attempt, request this
+        amount of time extension on the lease. This will be cached together with the
+        lease and might be used by other modules later.
+
+    revoke_delay
+        When using cache and ``valid_for`` results in a revocation, set the lease
+        validity to this value to allow a short amount of delay between the issuance
+        of the new lease and the revocation of the old one. Defaults to ``60``.
+        This will be cached together with the lease and might be used by other
+        modules later.
+
+    meta
+        When using cache, this value will be cached together with the lease. It will
+        be emitted by the ``vault_lease`` beacon module whenever a lease is
+        running out (usually because it cannot be extended further). It is intended
+        to support the reactor in deciding what needs to be done in order
+        to to reconfigure dependent, Vault-unaware software with newly issued
+        credentials. Entirely optional.
 
     mount
         The mount path the database backend is mounted to. Defaults to ``database``.
@@ -708,8 +745,27 @@ def get_creds(name, static=False, cache=True, valid_for=0, mount="database"):
         else:
             ckey += ".default"
         creds_cache = vault.get_lease_store(__opts__, __context__)
-        cached_creds = creds_cache.get(ckey, valid_for=valid_for)
+        cached_creds = creds_cache.get(
+            ckey, valid_for=valid_for, revoke=revoke_delay, check_server=check_server
+        )
         if cached_creds:
+            changed = False
+            for attr, val in (
+                ("min_ttl", valid_for),
+                ("renew_increment", renew_increment),
+                ("revoke_delay", revoke_delay),
+                ("meta", meta),
+            ):
+                if val is not None and getattr(cached_creds, attr) != val:
+                    setattr(cached_creds, attr, val)
+                    changed = True
+            if changed:
+                # Warn about changes if a lease is managed by the state module
+                # and this function is called e.g. during YAML rendering, overwriting
+                # the desired attributes. The state module sets this to false.
+                if _warn_about_attr_change:
+                    log.warning(f"Cached credential `{ckey}` changed lifecycle attributes")
+                creds_cache.store(ckey, cached_creds)
             return cached_creds.data
 
     try:
@@ -717,14 +773,20 @@ def get_creds(name, static=False, cache=True, valid_for=0, mount="database"):
     except vault.VaultException as err:
         raise CommandExecutionError(f"{err.__class__}: {err}") from err
 
-    lease = vault.VaultLease(**res)
+    lease = vault.VaultLease(
+        min_ttl=valid_for,
+        renew_increment=renew_increment,
+        revoke_delay=revoke_delay,
+        meta=meta,
+        **res,
+    )
     if cache:
         creds_cache.store(ckey, lease)
     return lease.data
 
 
 def clear_cached(
-    name=None, mount=None, cache=None, static=None, delta=60, flush_on_failure=True
+    name=None, mount=None, cache=None, static=None, delta=None, flush_on_failure=True
 ):
     """
     Clear and revoke cached database credentials matching specified parameters.
@@ -751,7 +813,7 @@ def clear_cached(
 
     delta
         Time after which the leases should be revoked by Vault.
-        Defaults to 60s.
+        Defaults to what was set on the lease(s) during creation or 60s.
 
     flush_on_failure
         If a revocation fails, remove the lease from cache anyways.
@@ -759,7 +821,7 @@ def clear_cached(
     """
     creds_cache = vault.get_lease_store(__opts__, __context__)
     return creds_cache.revoke_cached(
-        match=_create_cache_pattern(name=name, mount=mount, cache=cache, static=static),
+        match=create_cache_pattern(name=name, mount=mount, cache=cache, static=static),
         delta=delta,
         flush_on_failure=flush_on_failure,
     )
@@ -791,15 +853,15 @@ def list_cached(name=None, mount=None, cache=None, static=None):
     """
     creds_cache = vault.get_lease_store(__opts__, __context__)
     info = creds_cache.list_info(
-        match=_create_cache_pattern(name=name, mount=mount, cache=cache, static=static)
+        match=create_cache_pattern(name=name, mount=mount, cache=cache, static=static)
     )
     for lease in info.values():
         for val in ("creation_time", "expire_time"):
             if val in lease:
                 if val == "expire_time":
-                    lease["expires_in"] = int(
-                        lease[val] - datetime.utcnow().timestamp()
-                    )
+                    # The Vault util module stores the timestamp in the local time zone
+                    # FIXME?
+                    lease["expires_in"] = int(lease[val] - datetime.now().timestamp())
                     lease["expired"] = not (lease["expires_in"] > 0)
                 lease[val] = datetime.fromtimestamp(
                     lease[val], tz=timezone.utc
@@ -836,10 +898,12 @@ def renew_cached(name=None, mount=None, cache=None, static=None, increment=None)
         point of time onwards. Can also be used to reduce the validity period.
         The server might not honor this increment.
         Can be an integer (seconds) or a time string like ``1h``. Optional.
+        If unset, defaults to what was set on the lease during creation or
+        the lease's default TTL.
     """
     creds_cache = vault.get_lease_store(__opts__, __context__)
     return creds_cache.renew_cached(
-        match=_create_cache_pattern(name=name, mount=mount, cache=cache, static=static),
+        match=create_cache_pattern(name=name, mount=mount, cache=cache, static=static),
         increment=increment,
     )
 
@@ -887,7 +951,23 @@ def get_plugin_name(plugin):
     return f"{plugin_name}-database-plugin"
 
 
-def _create_cache_pattern(name=None, mount=None, cache=None, static=None):
+def create_cache_pattern(name=None, mount=None, cache=None, static=None):
+    """
+    Render a match pattern for operating on cached leases.
+    Unset parameters will result in a ``*`` glob.
+
+    name
+        The name of the database role.
+
+    static
+        Whether the role is static.
+
+    cache
+        Filter by cache name (refer to get_creds for details).
+
+    mount
+        The mount path the associated database backend is mounted to.
+    """
     ptrn = ["db"]
     ptrn.append("*" if mount is None else mount)
     ptrn.append("*" if static is None else "static" if static else "dynamic")

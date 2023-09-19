@@ -71,6 +71,11 @@ the output.**
 Manages database connections and their roles.
 
 
+``vault.leases``
+^^^^^^^^^^^^^^^^
+Manages cached leases and associated beacons.
+
+
 ``vault.pki``
 ^^^^^^^^^^^^^
 
@@ -157,6 +162,11 @@ Stops the vault service and disables it at boot time.
 Removes managed database connections and their roles.
 Requires ``remove_all_data_for_sure`` to be set to true
 to prevent accidental damage.
+
+
+``vault.leases.clean``
+^^^^^^^^^^^^^^^^^^^^^^
+Removes managed leases.
 
 
 ``vault.pki.clean``

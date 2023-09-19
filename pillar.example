@@ -57,6 +57,23 @@ vault:
   #         # ...       # Parameters to `vault_db.role_present`
   ##########
 
+    # Managed leases. This allows to ensure valid leases are present
+    # and associate beacons with them and - if desired - a state
+    # that will be emitted in the event when the lease expires.
+  leases:
+      # Database leases
+    database: {}
+    # Example:
+    # mysql_gitea:
+    #   role: gitea
+    #   mount: galera
+    #   valid_for: 1h  # at least at the time of the state run
+    #   beacon: true
+    #   beacon_interval: 240
+    #   meta: gitea
+    #   min_ttl: 13m   # below that, the beacon will emit events
+    #   check_server: true
+
     # Automatically open relevant ports.
     # Supported on RedHat family only currently.
   manage_firewall: true

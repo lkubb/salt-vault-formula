@@ -42,6 +42,8 @@ vault:
     pgp_keys: []
     root_token_pgp_key: null
     vault_addr: null
+  leases:
+    database: {}
   manage_firewall: true
   pki:
     ca: []

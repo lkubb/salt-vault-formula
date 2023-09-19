@@ -16,9 +16,7 @@
 include:
   - .package
   - .config
-{%- if vault.cert %}
   - .cert
-{%- endif %}
   - .service
 {%- if vault.init %}
   - .initialize
