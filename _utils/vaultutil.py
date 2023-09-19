@@ -837,7 +837,16 @@ def _build_authd_client(opts, context, force_local=False):
                     force_local=force_local,
                 )
             if secret_id is None:
-                secret_id = InvalidVaultSecretId()
+                # If the auth config is sourced locally, ensure the
+                # secret ID is known regardless whether we have a valid token.
+                # For remote sources, we would needlessly request one, so don't.
+                if (
+                    _get_salt_run_type(opts) in [SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL]
+                    or force_local
+                ):
+                    secret_id = _fetch_secret_id(config, opts, secret_id_cache, unauthd_client, force_local=force_local)
+                else:
+                    secret_id = InvalidVaultSecretId()
         role_id = config["auth"]["role_id"]
         # this happens with wrapped response merging
         if isinstance(role_id, dict):
@@ -2340,6 +2349,8 @@ class VaultSecretId(UseCountMixin, AccessorMixin, BaseLease):
             kwargs["lease_duration"] = kwargs.pop("secret_id_ttl")
             kwargs["num_uses"] = kwargs.pop("secret_id_num_uses", 0)
             kwargs["accessor"] = kwargs.pop("secret_id_accessor", None)
+        if "expiration_time" in kwargs:
+            kwargs["expire_time"] = kwargs.pop("expiration_time")
         super().__init__(**kwargs)
 
     def is_valid(self, valid_for=0, uses=1):
