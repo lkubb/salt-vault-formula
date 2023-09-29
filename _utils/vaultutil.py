@@ -480,7 +480,10 @@ def clear_cache(
                         config["cache"]["expire_events"]
                         and not force_local
                         and _get_salt_run_type(opts)
-                        != SALT_RUNTYPE_MASTER_IMPERSONATING
+                        not in (
+                            SALT_RUNTYPE_MASTER_IMPERSONATING,
+                            SALT_RUNTYPE_MASTER_PEER_RUN,
+                        )
                     ):
                         scope = cbank.split("/")[-1]
                         _get_event(opts)(
@@ -535,7 +538,7 @@ def update_config(opts, context, keep_session=False):
         significantly.
         Defaults to False.
     """
-    if _get_salt_run_type(opts) in [SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL]:
+    if _get_salt_run_type(opts) in (SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL):
         # local configuration is not cached
         return True
     connection_cbank = _get_cache_bank(opts)
@@ -554,7 +557,7 @@ def update_config(opts, context, keep_session=False):
 def _get_cache_backend(config, opts):
     if config["cache"]["backend"] == "session":
         return None
-    if config["cache"]["backend"] in ["localfs", "disk", "file"]:
+    if config["cache"]["backend"] in ("localfs", "disk", "file"):
         # cache.Cache does not allow setting the type of cache by param
         local_opts = copy.copy(opts)
         local_opts["cache"] = "localfs"
@@ -661,7 +664,7 @@ def _get_salt_run_type(opts):
         return SALT_RUNTYPE_MASTER
 
     config_location = opts.get("vault", {}).get("config_location")
-    if config_location and config_location not in ["local", "master"]:
+    if config_location and config_location not in ("local", "master"):
         raise salt.exceptions.InvalidConfigError(
             "Invalid vault configuration: config_location must be either local or master"
         )
@@ -684,10 +687,10 @@ def _get_cache_bank(opts, force_local=False, connection=True, session=False):
     minion_id = None
     # force_local is necessary because pillar compilation would otherwise
     # leak tokens between master and minions
-    if not force_local and _get_salt_run_type(opts) in [
+    if not force_local and _get_salt_run_type(opts) in (
         SALT_RUNTYPE_MASTER_IMPERSONATING,
         SALT_RUNTYPE_MASTER_PEER_RUN,
-    ]:
+    ):
         minion_id = opts["grains"]["id"]
     prefix = "vault" if minion_id is None else f"minions/{minion_id}/vault"
     if session:
@@ -840,7 +843,7 @@ def _build_authd_client(opts, context, force_local=False):
                 # For remote sources, we would needlessly request one, so don't.
                 if (
                     _get_salt_run_type(opts)
-                    in [SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL]
+                    in (SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL)
                     or force_local
                 ):
                     secret_id = _fetch_secret_id(
@@ -868,7 +871,7 @@ def _build_authd_client(opts, context, force_local=False):
         client = AuthenticatedVaultClient(
             auth, session=unauthd_client.session, **config["server"]
         )
-    elif config["auth"]["method"] in ["token", "wrapped_token"]:
+    elif config["auth"]["method"] in ("token", "wrapped_token"):
         token = _fetch_token(
             config,
             opts,
@@ -927,7 +930,7 @@ def _get_connection_config(
     cbank, opts, context, force_local=False, pre_flush=False, update=False
 ):
     if (
-        _get_salt_run_type(opts) in [SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL]
+        _get_salt_run_type(opts) in (SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL)
         or force_local
     ):
         # only cache config fetched from remote
@@ -1045,7 +1048,7 @@ def _fetch_secret_id(config, opts, secret_id_cache, unwrap_client, force_local=F
         return secret_id
 
     if (
-        _get_salt_run_type(opts) in [SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL]
+        _get_salt_run_type(opts) in (SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL)
         or force_local
     ):
         secret_id = config["auth"]["secret_id"]
@@ -1108,7 +1111,7 @@ def _fetch_token(
         return token
 
     if (
-        _get_salt_run_type(opts) in [SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL]
+        _get_salt_run_type(opts) in (SALT_RUNTYPE_MASTER, SALT_RUNTYPE_MINION_LOCAL)
         or force_local
     ):
         token = None
@@ -1417,17 +1420,17 @@ def parse_config(config, validate=True, opts=None, require_token=True):
         )
         # ttl, uses were used as configuration for issuance and minion overrides as well
         # as token meta information. The new configuration splits those semantics.
-        for old_token_conf, new_token_conf in [
+        for old_token_conf, new_token_conf in (
             ("ttl", "explicit_max_ttl"),
             ("uses", "num_uses"),
-        ]:
+        ):
             if old_token_conf in merged["auth"]:
                 merged["issue"]["token"]["params"][new_token_conf] = merged[
                     "issue_params"
                 ][new_token_conf] = merged["auth"].pop(old_token_conf)
         # Those were found in the root namespace, but grouping them together
         # makes semantic and practical sense.
-        for old_server_conf in ["namespace", "url", "verify"]:
+        for old_server_conf in ("namespace", "url", "verify"):
             if old_server_conf in merged:
                 merged["server"][old_server_conf] = merged.pop(old_server_conf)
         if "role_name" in merged:
@@ -1900,7 +1903,7 @@ class VaultClient:
             raise VaultUnsupportedOperationError(errors)
         if res.status_code == 412:
             raise VaultPreconditionFailedError(errors)
-        if res.status_code in [500, 502]:
+        if res.status_code in (500, 502):
             raise VaultServerError(errors)
         if res.status_code == 503:
             raise VaultUnavailableError(errors)
@@ -2706,15 +2709,16 @@ class VaultLeaseCache(LeaseCacheMixin, CommonCache):
         try:
             ret = self._check_validity(data, valid_for=valid_for)
         except VaultLeaseExpired:
-            self.expire_events(
-                tag=f"vault/lease/{ckey}/expire",
-                data={
-                    "valid_for_less": valid_for
-                    if valid_for is not None
-                    else data.get("min_ttl") or 0,
-                    "meta": data.get("meta"),
-                },
-            )
+            if self.expire_events is not None:
+                self.expire_events(
+                    tag=f"vault/lease/{ckey}/expire",
+                    data={
+                        "valid_for_less": valid_for
+                        if valid_for is not None
+                        else data.get("min_ttl") or 0,
+                        "meta": data.get("meta"),
+                    },
+                )
             ret = None
         if ret is None and flush:
             log.debug("Cached lease not valid anymore. Flushing cache.")
@@ -3258,7 +3262,7 @@ class VaultKV:
         if (
             ret["type"] == "kv"
             and path_metadata["options"] is not None
-            and path_metadata.get("options", {}).get("version", "1") in ["2"]
+            and path_metadata.get("options", {}).get("version", "1") in ("2",)
         ):
             ret["v2"] = True
             ret["data"] = self._v2_the_path(path, path_metadata.get("path", path))
@@ -3279,7 +3283,7 @@ class VaultKV:
         Given a path, a filter, and a path type, properly inject
         'data' or 'metadata' into the path.
         """
-        possible_types = ["data", "metadata", "delete", "destroy"]
+        possible_types = ("data", "metadata", "delete", "destroy")
         if ptype not in possible_types:
             raise AssertionError()
         msg = f"Path {path} already contains {ptype} in the right place - saltstack duct tape?"
@@ -3912,11 +3916,11 @@ def get_vault_connection():
         "issued": token.creation_time,
     }
 
-    if _get_salt_run_type(opts) in [
+    if _get_salt_run_type(opts) in (
         SALT_RUNTYPE_MASTER_IMPERSONATING,
         SALT_RUNTYPE_MASTER_PEER_RUN,
         SALT_RUNTYPE_MINION_REMOTE,
-    ]:
+    ):
         ret["lease_duration"] = token.explicit_max_ttl
         ret["uses"] = token.num_uses
     else:
