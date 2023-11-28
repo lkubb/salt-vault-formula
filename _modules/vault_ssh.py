@@ -997,9 +997,11 @@ def create_certificate(
         # hours is the largest suffix apparently
         ttl = f"{kwargs['days_valid'] * 24}h"
 
-    pubkey = __salt__["ssh_pki.get_public_key"](
-        kwargs.get("private_key") or kwargs.get("public_key")
-    )
+    if kwargs.get("private_key"):
+        pubkey = __salt__["ssh_pki.get_public_key"](kwargs["private_key"], passphrase=kwargs.get("private_key_passphrase"))
+    elif kwargs.get("public_key"):
+        pubkey = __salt__["ssh_pki.get_public_key"](kwargs["public_key"])
+
     ca_server = ca_server or "ssh"
 
     return sign_key(
