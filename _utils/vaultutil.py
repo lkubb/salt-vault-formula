@@ -703,6 +703,14 @@ def get_authd_client(opts, context, force_local=False, get_config=False):
     """
     Returns an AuthenticatedVaultClient that is valid for at least one query.
     """
+    # salt-ssh
+    if "__master_opts__" in opts and "vault" not in opts:
+        # Let's run the same way as during pillar compilation.
+        vopts = {}
+        vopts.update(opts)
+        vopts.update(opts["__master_opts__"])
+        vopts["id"] = vopts["minion_id"] = opts["id"]
+        opts = vopts
 
     def try_build():
         client = config = None
