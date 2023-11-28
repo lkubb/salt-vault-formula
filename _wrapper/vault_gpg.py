@@ -7,7 +7,6 @@ The API docs can be found `here <https://github.com/LeSuisse/vault-gpg-plugin/bl
 
 import base64
 import logging
-import os.path
 from pathlib import Path
 
 import vaultutil as vault
