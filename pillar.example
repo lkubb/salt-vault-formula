@@ -130,6 +130,14 @@ vault:
     # When applying `clean` states, do not prevent accidental data loss
   remove_all_data_for_sure: false
 
+    # A mapping of path to parameters for vault_secret.present
+    # for secrets to manage
+  secrets: {}
+
+    # A list of secret paths (or dicts with 'operation' and 'path' keys)
+    # to ensure absence of
+  secrets_absent: []
+
     # Manage SSH secret backend mounts. This should be a map of
     # mount name to mount configuration.
     # The mount configuration can have three keys, `ca`, `roles` and `roles_absent`.

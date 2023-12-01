@@ -53,6 +53,8 @@ vault:
   plugins: []
   plugins_absent: []
   remove_all_data_for_sure: false
+  secrets: {}
+  secrets_absent: []
   ssh: {}
   version: null
 

@@ -154,6 +154,11 @@ Manages present/absent custom plugins.
 For present ones, pulls binaries from a URI and registers them.
 
 
+``vault.secrets``
+^^^^^^^^^^^^^^^^^
+Manages Vault KV secrets.
+
+
 ``vault.ssh``
 ^^^^^^^^^^^^^
 Manages SSH secret backend roles and, if required, CAs.
@@ -229,6 +234,11 @@ Does nothing at the moment.
 ``vault.plugins.clean``
 ^^^^^^^^^^^^^^^^^^^^^^^
 
+
+
+``vault.secrets.clean``
+^^^^^^^^^^^^^^^^^^^^^^^
+Removes managed secrets.
 
 
 ``vault.ssh.clean``
