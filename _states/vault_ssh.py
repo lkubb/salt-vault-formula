@@ -348,8 +348,8 @@ def role_present(
             ("port", port),
             ("allowed_users_template", allowed_users_template),
             ("allowed_domains_template", allowed_domains_template),
-            ("ttl", ttl),
-            ("max_ttl", max_ttl),
+            ("ttl", vault.timestring_map(ttl)),
+            ("max_ttl", vault.timestring_map(max_ttl)),
             ("allow_user_certificates", allow_user_certificates),
             ("allow_host_certificates", allow_host_certificates),
             ("allow_bare_domains", allow_bare_domains),
@@ -358,7 +358,7 @@ def role_present(
             ("key_id_format", key_id_format),
             ("allowed_user_key_length", allowed_user_key_length),
             ("algorithm_signer", algorithm_signer),
-            ("not_before_duration", not_before_duration),
+            ("not_before_duration", vault.timestring_map(not_before_duration)),
         ):
             if same_key_type and (
                 (key_type == "otp" and param in ca_params)
