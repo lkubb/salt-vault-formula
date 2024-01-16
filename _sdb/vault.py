@@ -119,6 +119,8 @@ def get(key, profile=None):
                 return vault.read_kv(full_path, __opts__, __context__)
             except (vault.VaultNotFoundError, vault.VaultPermissionDeniedError):
                 raise err
+    except vault.VaultNotFoundError:
+        return None
     except Exception as err:  # pylint: disable=broad-except
         log.error("Failed to read secret! %s: %s", type(err).__name__, err)
         raise salt.exceptions.CommandExecutionError(err) from err
