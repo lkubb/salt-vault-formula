@@ -2,9 +2,13 @@
 Custom execution module for managing a Hashicorp Vault server.
 This is intended to complement the official module.
 """
+import logging
 
+import salt.utils.json
 import salt.utils.path
 from salt.exceptions import CommandExecutionError
+
+log = logging.getLogger(__name__)
 
 __virtualname__ = "vault_server"
 
@@ -66,8 +70,11 @@ def _vault(
             )
         )
 
-    if not out["retcode"] and json:
-        out["parsed"] = salt.utils.json.loads(out["stdout"])
+    if json:
+        try:
+            out["parsed"] = salt.utils.json.loads(out["stdout"])
+        except Exception as err:  # pylint: disable=broad-except
+            log.error(str(err))
     return out
 
 
@@ -95,9 +102,10 @@ def is_initialized(vault_addr="https://127.0.0.1:8200"):
     vault_addr
         The URL of the Vault server. Defaults to ``https://127.0.0.1:8200.``
     """
-    # exit code: 0=yes 1=error 2=no
-    out = _vault("status", expect_error=True, vault_addr=vault_addr)
-    return out["retcode"] == 0
+    # exit code: 0=yes 1=error 2=no/waiting for (initial?) unseal
+    return _vault("status", expect_error=True, vault_addr=vault_addr)["parsed"][
+        "initialized"
+    ]
 
 
 def initialize(
