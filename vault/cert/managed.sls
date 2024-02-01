@@ -36,14 +36,13 @@ Vault API certificate is managed:
                               (vault.lookup.paths.api_key if not vault.cert.ca_server and not vault.cert.signing_cert
                               else "null") }}
     - private_key: {{ vault.lookup.paths.api_key }}
-    - days_valid: {{ vault.cert.days_valid or "null" }}
     - days_remaining: {{ vault.cert.days_remaining or "null" }}
     - days_valid: {{ vault.cert.days_valid or "null" }}
     - authorityKeyIdentifier: keyid:always
     - basicConstraints: critical, CA:false
     - subjectKeyIdentifier: hash
 {%-   if vault.cert.san %}
-    - subjectAltName:  {{ vault.cert.san | json }}
+    - subjectAltName: {{ vault.cert.san | json }}
 {%-   else %}
     - subjectAltName:
       - dns: {{ vault.cert.cn or ([grains.fqdn] + grains.fqdns) | reject("==", "localhost.localdomain") | first | d(grains.id) }}
@@ -88,14 +87,13 @@ Vault client certificate is managed:
                               (vault.lookup.paths.client_key if not vault.cert.ca_server and not vault.cert.signing_cert
                               else "null") }}
     - private_key: {{ vault.lookup.paths.client_key }}
-    - days_valid: {{ vault.cert.days_valid or "null" }}
     - days_remaining: {{ vault.cert.days_remaining or "null" }}
     - days_valid: {{ vault.cert.days_valid or "null" }}
     - authorityKeyIdentifier: keyid:always
     - basicConstraints: critical, CA:false
     - subjectKeyIdentifier: hash
 {%-   if vault.cert.san %}
-    - subjectAltName:  {{ vault.cert.san | json }}
+    - subjectAltName: {{ vault.cert.san | json }}
 {%-   else %}
     - subjectAltName:
       - dns: {{ vault.cert.cn or ([grains.fqdn] + grains.fqdns) | reject("==", "localhost.localdomain") | first | d(grains.id) }}

@@ -3641,7 +3641,7 @@ class LeaseStore:
             payload["increment"] = int(timestring_map(increment))
         if isinstance(lease, VaultLease) and lease.renew_increment is not None:
             payload["increment"] = max(
-                int(timestring_map(lease.renew_increment), payload.get("increment", 0))
+                int(timestring_map(lease.renew_increment)), payload.get("increment", 0)
             )
         try:
             ret = self.client.post(endpoint, payload=payload)
