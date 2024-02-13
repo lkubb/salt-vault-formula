@@ -101,7 +101,7 @@ def connection_present(
                 param not in current["connection_details"]
                 or current["connection_details"][param] != val
             ):
-                changed.update({param: {"old": current.get(param), "new": val}})
+                changed.update({param: {"old": current["connection_details"].get(param), "new": val}})
         return changed
 
     try:
