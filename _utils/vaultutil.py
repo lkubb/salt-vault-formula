@@ -642,7 +642,7 @@ def expand_pattern_lists(pattern, **mappings):
         if field_name is None:
             continue
         (value, _) = f.get_field(field_name, None, mappings)
-        if isinstance(value, list):
+        if isinstance(value, (list, dict)):
             token = f"{{{field_name}}}"
             expanded = [pattern.replace(token, str(elem)) for elem in value]
             for expanded_item in expanded:
@@ -1502,7 +1502,7 @@ def parse_config(config, validate=True, opts=None, require_token=True):
             if "role_id" not in merged["auth"]:
                 raise AssertionError("auth:role_id is required for approle auth")
         elif merged["auth"]["method"] == "token":
-            if "token" not in merged["auth"]:
+            if require_token and "token" not in merged["auth"]:
                 raise AssertionError("auth:token is required for token auth")
         else:
             raise AssertionError(
@@ -1553,6 +1553,10 @@ class VaultLeaseExpired(VaultException):
     """
     Raised when a cached lease is reported to be expired locally.
     """
+
+    def __init__(self, lease):
+        super().__init__()
+        self.lease = lease
 
 
 class VaultAuthExpired(VaultException):
@@ -2226,6 +2230,10 @@ class DurationMixin:
             return True
         return abs(delta) <= blur
 
+    @property
+    def ttl_left(self):
+        return max(self.expire_time - round(time.time()), 0)
+
 
 class UseCountMixin:
     """
@@ -2729,7 +2737,7 @@ class LeaseCacheMixin:
                 log.debug("Using cached lease.")
                 return lease
         if self.expire_events is not None:
-            raise VaultLeaseExpired()
+            raise VaultLeaseExpired(lease)
         return None
 
 
@@ -2737,6 +2745,7 @@ class VaultLeaseCache(LeaseCacheMixin, CommonCache):
     """
     Handles caching of Vault leases. Supports multiple cache keys.
     Checks whether cached leases are still valid before returning.
+    Does not enforce for per-lease ``min_ttl``.
     """
 
     def get(self, ckey, valid_for=0, flush=True):
@@ -2749,15 +2758,16 @@ class VaultLeaseCache(LeaseCacheMixin, CommonCache):
             return data
         try:
             ret = self._check_validity(data, valid_for=valid_for)
-        except VaultLeaseExpired:
+        except VaultLeaseExpired as err:
             if self.expire_events is not None:
                 self.expire_events(
                     tag=f"vault/lease/{ckey}/expire",
                     data={
                         "valid_for_less": valid_for
                         if valid_for is not None
-                        else data.get("min_ttl") or 0,
-                        "meta": data.get("meta"),
+                        else err.lease.min_ttl or 0,
+                        "ttl_left": err.lease.ttl_left,
+                        "meta": err.lease.meta,
                     },
                 )
             ret = None
@@ -3355,7 +3365,7 @@ class VaultKV:
         if (
             ret["type"] == "kv"
             and path_metadata["options"] is not None
-            and path_metadata.get("options", {}).get("version", "1") in ("2",)
+            and path_metadata.get("options", {}).get("version", "1") == "2"
         ):
             ret["v2"] = True
             ret["data"] = self._v2_the_path(path, path_metadata.get("path", path))
@@ -3434,9 +3444,9 @@ class LeaseStore:
     def __init__(self, client, cache, expire_events=None):
         self.client = client
         self.cache = cache
+        self.expire_events = expire_events
         # to update cached leases after renewal/revocation, we need a mapping id => ckey
         self.lease_id_ckey_cache = {}
-        self.expire_events = expire_events
 
     def get(
         self,
@@ -3459,7 +3469,7 @@ class LeaseStore:
             This can be an integer, which will be interpreted as seconds, or a
             time string using the same format as Vault does:
             Suffix ``s`` for seconds, ``m`` for minutes, ``h`` for hours, ``d`` for days.
-            Defaults to what was set on the lease when creating it or 0.
+            Defaults to the minimum TTL that was set on the lease when creating it or 0.
 
             .. note::
 
@@ -3486,8 +3496,8 @@ class LeaseStore:
         revoke
             If the lease is not valid for ``valid_for`` and renewals
             are disabled or impossible, attempt to have Vault revoke the lease
-            after this amount of time and flush the cache. Defaults to what was
-            set when creating the lease or 60s.
+            after this amount of time and flush the cache. Defaults to the
+            revocation delay that was set on the lease when creating it or 60s.
 
         check_server
             Check on the Vault server whether the lease is still active and was not
@@ -3500,18 +3510,17 @@ class LeaseStore:
                 "When renew_increment is set, it must be at least valid_for to make sense"
             )
 
-        def check_revoke(lease):
+        def check_revoke(lease, min_valid, validity_override=None):
             if self.expire_events is not None:
-                self.expire_events(
-                    tag=f"vault/lease/{ckey}/expire",
-                    data={
-                        "valid_for_less": valid_for
-                        if valid_for is not None
-                        else (lease.min_ttl or 0),
-                        "meta": lease.meta,
-                    },
-                )
-            if revoke:
+                event_data = {
+                    "valid_for_less": round(min_valid),
+                    "ttl": validity_override
+                    if validity_override is not None
+                    else lease.ttl_left,
+                    "meta": lease.meta,
+                }
+                self.expire_events(tag=f"vault/lease/{ckey}/expire", data=event_data)
+            if revoke is None or revoke:
                 self.revoke(lease, delta=revoke)
             return None
 
@@ -3541,20 +3550,20 @@ class LeaseStore:
                     # TODO: Save the updated info?
                     self.lookup(lease)
                 except VaultNotFoundError:
-                    return check_revoke(lease)
+                    return check_revoke(lease, effective_min_validity, 0)
             return lease
 
         if not renew:
-            return check_revoke(lease)
+            return check_revoke(lease, effective_min_validity)
         try:
             lease = self.renew(lease, increment=renew_increment, raise_all_errors=False)
         except VaultNotFoundError:
             # The cached lease was already revoked
-            return check_revoke(lease)
+            return check_revoke(lease, effective_min_validity, 0)
         if not lease.is_valid_for(effective_min_validity, blur=renew_blur):
             if renew_increment is not None:
                 # valid_for cannot possibly be respected
-                return check_revoke(lease)
+                return check_revoke(lease, effective_min_validity)
             # Maybe valid_for is greater than the default validity period, so check if
             # the lease can be renewed by valid_for
             try:
@@ -3563,16 +3572,31 @@ class LeaseStore:
                 )
             except VaultNotFoundError:
                 # The cached lease was already revoked
-                return check_revoke(lease)
-            if not lease.is_valid_for(valid_for, blur=renew_blur):
-                return check_revoke(lease)
+                return check_revoke(lease, effective_min_validity, 0)
+            if not lease.is_valid_for(effective_min_validity, blur=renew_blur):
+                return check_revoke(lease, effective_min_validity)
         return lease
 
     def list(self):
         """
-        List all cached leases.
+        List all known cache keys of cached leases.
         """
         return self.cache.list()
+
+    def _list_cached_leases(self, match="*", flush=False):
+        """
+        Helper for functions that operate on the cached leases.
+        """
+        leases = []
+        for ckey in self.list():
+            if not fnmatch.fnmatch(ckey, match):
+                continue
+            lease = self.cache.get(ckey, flush=flush)
+            if lease is None:
+                continue
+            self.lease_id_ckey_cache[str(lease)] = ckey
+            leases.append((ckey, lease))
+        return leases
 
     def list_info(self, match="*"):
         """
@@ -3583,13 +3607,7 @@ class LeaseStore:
             Defaults to ``*``.
         """
         ret = {}
-        for ckey in self.list():
-            if not fnmatch.fnmatch(ckey, match):
-                continue
-            lease = self.cache.get(ckey, flush=False)
-            if lease is None:
-                continue
-            self.lease_id_ckey_cache[str(lease)] = ckey
+        for ckey, lease in self._list_cached_leases(match=match, flush=False):
             info = lease.to_dict()
             # do not leak auth data
             info.pop("data", None)
@@ -3676,17 +3694,11 @@ class LeaseStore:
             point of time onwards. Can also be used to reduce the validity period.
             The server might not honor this increment.
             Can be an integer (seconds) or a time string like ``1h``. Optional.
-            If unset, defaults to what was set on the lease during creation or
-            the lease's default TTL.
+            If unset, defaults to the renewal increment that was set when creating
+            the lease.
         """
         failed = []
-        for ckey in self.list():
-            if not fnmatch.fnmatch(ckey, match):
-                continue
-            lease = self.cache.get(ckey, flush=True)
-            if lease is None:
-                continue
-            self.lease_id_ckey_cache[str(lease)] = ckey
+        for ckey, lease in self._list_cached_leases(match=match, flush=True):
             try:
                 self.renew(lease, increment=increment)
             except (VaultPermissionDeniedError, VaultNotFoundError) as err:
@@ -3708,7 +3720,8 @@ class LeaseStore:
         delta
             Time after which the lease should be requested
             to be revoked by Vault.
-            Defaults to what was set when creating the lease or 60s.
+            Defaults to the revocation delay that was set when creating
+            the lease or 60s.
         """
         if delta is None:
             if isinstance(lease, VaultLease) and lease.revoke_delay is not None:
@@ -3741,20 +3754,15 @@ class LeaseStore:
 
         delta
             Time after which the leases should be revoked by Vault.
-            Defaults to what was set on the lease(s) during creation or 60s.
+            Defaults to the revocation delay that was set when creating
+            the lease(s) or 60s.
 
         flush_on_failure
             If a revocation fails, remove the lease from cache anyways.
             Defaults to true.
         """
         failed = []
-        for ckey in self.list():
-            if not fnmatch.fnmatch(ckey, match):
-                continue
-            lease = self.cache.get(ckey, flush=True)
-            if lease is None:
-                continue
-            self.lease_id_ckey_cache[str(lease)] = ckey
+        for ckey, lease in self._list_cached_leases(match=match, flush=True):
             try:
                 self.revoke(lease, delta=delta)
             except VaultPermissionDeniedError:
