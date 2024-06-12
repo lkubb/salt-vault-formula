@@ -12,9 +12,11 @@ import copy
 import datetime
 import fnmatch
 import logging
+import random
 import re
 import string
 import time
+from itertools import takewhile
 
 import requests
 import salt.cache
@@ -28,9 +30,20 @@ import salt.utils.dictupdate
 import salt.utils.event
 import salt.utils.json
 import salt.utils.versions
+from requests.adapters import HTTPAdapter
+from requests.adapters import Retry
 from requests.exceptions import ConnectionError
-from requests.packages.urllib3.util.ssl_ import create_urllib3_context
 from salt.exceptions import SaltInvocationError
+
+try:
+    from urllib3.util import create_urllib3_context
+
+    URLLIB3V1 = False
+except ImportError:
+    # urllib <2
+    from urllib3.util.ssl_ import create_urllib3_context
+
+    URLLIB3V1 = True
 
 try:
     from salt.defaults import NOT_SET
@@ -44,6 +57,30 @@ logging.getLogger("requests").setLevel(logging.WARNING)
 
 TOKEN_CKEY = "__token"
 CLIENT_CKEY = "_vault_authd_client"
+
+HTTP_TOO_MANY_REQUESTS = 429
+
+# Default timeout configuration
+DEFAULT_CONNECT_TIMEOUT = 9.2
+DEFAULT_READ_TIMEOUT = 30
+
+# Default retry configuration
+DEFAULT_MAX_RETRIES = 5
+DEFAULT_BACKOFF_FACTOR = 0.1
+DEFAULT_BACKOFF_MAX = 10.0
+DEFAULT_BACKOFF_JITTER = 0.2
+DEFAULT_RETRY_POST = False
+DEFAULT_RESPECT_RETRY_AFTER = True
+DEFAULT_RETRY_AFTER_MAX = 60
+# https://developer.hashicorp.com/vault/api-docs#http-status-codes
+# 412: eventually consistent data is still missing (Enterprise)
+DEFAULT_RETRY_STATUS = (412, 500, 502, 503, 504)
+
+# Caps for retry configuration
+MAX_MAX_RETRIES = 10
+MAX_BACKOFF_FACTOR = 3.0
+MAX_BACKOFF_MAX = 60.0
+MAX_BACKOFF_JITTER = 5.0
 
 
 def query(
@@ -912,7 +949,7 @@ def _build_authd_client(opts, context, force_local=False):
             token_store=token_auth,
         )
         client = AuthenticatedVaultClient(
-            auth, session=unauthd_client.session, **config["server"]
+            auth, session=unauthd_client.session, **config["server"], **config["client"]
         )
     elif config["auth"]["method"] in ("token", "wrapped_token"):
         token = _fetch_token(
@@ -925,7 +962,7 @@ def _build_authd_client(opts, context, force_local=False):
         )
         auth = VaultTokenAuth(token=token, cache=token_cache)
         client = AuthenticatedVaultClient(
-            auth, session=unauthd_client.session, **config["server"]
+            auth, session=unauthd_client.session, **config["server"], **config["client"]
         )
 
     if client is not None:
@@ -964,9 +1001,24 @@ def _build_revocation_client(opts, context, force_local=False):
         return None, None
     auth = VaultTokenAuth(token=token, cache=token_cache)
     client = AuthenticatedVaultClient(
-        auth, session=unauthd_client.session, **config["server"]
+        auth, session=unauthd_client.session, **config["server"], **config["client"]
     )
     return client, config
+
+
+def _check_upgrade(config, pre_flush=False):
+    """
+    Check if cached configuration contains all expected keys.
+    Relevant when new keys are introduced to not break immediately after
+    an update since the cached config is assumed to have been parsed already.
+    pre_flush needs to be passed since we don't want to cause an update
+    immediately before flushing the cache anyways.
+    """
+    if "client" not in config:
+        if not pre_flush:
+            return True
+        config["client"] = {}
+    return False
 
 
 def _get_connection_config(
@@ -990,9 +1042,12 @@ def _get_connection_config(
     # an exception indicating all connection-scoped data should be flushed
     # if the config is outdated.
     config = config_cache.get()
-    if config is not None and not update:
-        log.debug("Using cached Vault server connection configuration.")
-        return config, None, VaultClient(**config["server"])
+    if config is not None:
+        # Check if the cached config is compatible with the current version.
+        update = update or _check_upgrade(config, pre_flush)
+        if not update:
+            log.debug("Using cached Vault server connection configuration.")
+            return config, None, VaultClient(**config["server"], **config["client"])
 
     if pre_flush:
         # used when building a client that revokes leases before clearing cache
@@ -1030,6 +1085,7 @@ def _get_connection_config(
     new_config = {
         "auth": new_config["auth"],
         "cache": new_config["cache"],
+        "client": new_config["client"],
         "server": new_config["server"],
     }
     if update and config:
@@ -1047,6 +1103,8 @@ def _get_connection_config(
         config_cache.flush(cbank=False)
 
     config_cache.store(new_config)
+    if unwrap_client is None:
+        unwrap_client = VaultClient(**new_config["server"], **new_config["client"])
     return new_config, embedded_token, unwrap_client
 
 
@@ -1058,10 +1116,11 @@ def _use_local_config(opts):
         {
             "auth": config["auth"],
             "cache": config["cache"],
+            "client": config["client"],
             "server": config["server"],
         },
         embedded_token,
-        VaultClient(**config["server"]),
+        VaultClient(**config["server"], **config["client"]),
     )
 
 
@@ -1405,6 +1464,18 @@ def parse_config(config, validate=True, opts=None, require_token=True):
             "kv_metadata": "connection",
             "secret": "ttl",
         },
+        "client": {
+            "connect_timeout": DEFAULT_CONNECT_TIMEOUT,
+            "read_timeout": DEFAULT_READ_TIMEOUT,
+            "max_retries": DEFAULT_MAX_RETRIES,
+            "backoff_factor": DEFAULT_BACKOFF_FACTOR,
+            "backoff_max": DEFAULT_BACKOFF_MAX,
+            "backoff_jitter": DEFAULT_BACKOFF_JITTER,
+            "retry_post": DEFAULT_RETRY_POST,
+            "retry_status": list(DEFAULT_RETRY_STATUS),
+            "respect_retry_after": DEFAULT_RESPECT_RETRY_AFTER,
+            "retry_after_max": DEFAULT_RETRY_AFTER_MAX,
+        },
         "issue": {
             "allow_minion_override_params": False,
             "type": "token",
@@ -1493,6 +1564,9 @@ def parse_config(config, validate=True, opts=None, require_token=True):
         # same for token_lifecycle
         if local_config.get("auth", {}).get("token_lifecycle"):
             merged["auth"]["token_lifecycle"] = local_config["auth"]["token_lifecycle"]
+        # and client config
+        if local_config.get("client"):
+            merged["client"] = {**merged["client"], **local_config["client"]}
 
     if not validate:
         return merged
@@ -1633,6 +1707,12 @@ class VaultPreconditionFailedError(VaultException):
     """
 
 
+class VaultRateLimitExceededError(VaultException):
+    """
+    HTTP 429
+    """
+
+
 class VaultServerError(VaultException):
     """
     HTTP 500
@@ -1647,14 +1727,30 @@ class VaultUnavailableError(VaultException):
     """
 
 
-class CACertHTTPSAdapter(requests.sessions.HTTPAdapter):
+class VaultAPIAdapter(HTTPAdapter):
     """
-    Allows to restrict requests CA chain validation
-    to a single root certificate without writing it to disk.
+    An adapter that
+
+        * allows to restrict requests CA chain validation to a single
+          root certificate without writing it to disk.
+        * sets default values for timeout settings without having to
+          specify it in every request.
     """
 
-    def __init__(self, ca_cert_data, *args, **kwargs):
+    def __init__(
+        self, *args, verify=None, connect_timeout=None, read_timeout=None, **kwargs
+    ):
+        ca_cert_data = None
+        try:
+            if verify.strip().startswith("-----BEGIN CERTIFICATE"):
+                ca_cert_data = verify
+                verify = None
+        except AttributeError:
+            pass
         self.ca_cert_data = ca_cert_data
+        self.verify = verify
+        self.connect_timeout = connect_timeout or DEFAULT_CONNECT_TIMEOUT
+        self.read_timeout = read_timeout or DEFAULT_READ_TIMEOUT
         super().__init__(*args, **kwargs)
 
     def init_poolmanager(
@@ -1664,12 +1760,137 @@ class CACertHTTPSAdapter(requests.sessions.HTTPAdapter):
         block=requests.adapters.DEFAULT_POOLBLOCK,
         **pool_kwargs,
     ):
-        ssl_context = create_urllib3_context()
-        ssl_context.load_verify_locations(cadata=self.ca_cert_data)
-        pool_kwargs["ssl_context"] = ssl_context
+        if self.ca_cert_data is not None:
+            ssl_context = create_urllib3_context()
+            ssl_context.load_verify_locations(cadata=self.ca_cert_data)
+            pool_kwargs["ssl_context"] = ssl_context
         return super().init_poolmanager(
             connections, maxsize, block=block, **pool_kwargs
         )
+
+    def send(
+        self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None
+    ):
+        """
+        Wrap sending the request to ensure ``verify`` and ``timeout`` is set
+        as specified on every request. ``timeout`` can be overridden per request.
+        """
+        if self.verify is not None:
+            verify = self.verify
+        if timeout is None:
+            timeout = (self.connect_timeout, self.read_timeout)
+        return super().send(
+            request,
+            stream=stream,
+            timeout=timeout,
+            verify=verify,
+            cert=cert,
+            proxies=proxies,
+        )
+
+
+class VaultRetry(Retry):
+    """
+    The Vault API responds with HTTP 429 when rate limits have been hit.
+    We want to always retry 429, regardless of the HTTP verb and the presence
+    of the ``Retry-After`` header, thus we need to subclass the retry configuration class.
+    For HTTP error responses, we do not want to retry immediately if the header was not set.
+
+    We override the default exponential power-of-2 algorithm for calculating
+    the backoff time with a Fibonacci one because we expect a relatively
+    quick turnaround.
+    """
+
+    PHI = 1.618
+    SQRT5 = 2.236
+
+    def __init__(
+        self,
+        *args,
+        backoff_jitter=0.0,
+        backoff_max=Retry.DEFAULT_BACKOFF_MAX,
+        retry_after_max=DEFAULT_RETRY_AFTER_MAX,
+        **kwargs,
+    ):
+        """
+        For ``urllib3<2``, backport ``backoff_max`` and ``backoff_jitter``.
+        Also, allow limiting the value returned by ``Retry-After`` by
+        specifying ``retry_after_max``.
+        """
+        if URLLIB3V1:
+            self.backoff_max = backoff_max
+            self.backoff_jitter = backoff_jitter
+        else:
+            kwargs["backoff_max"] = backoff_max
+            kwargs["backoff_jitter"] = backoff_jitter
+        self.retry_after_max = retry_after_max
+        super().__init__(*args, **kwargs)
+
+    def is_retry(self, method, status_code, has_retry_after=False):
+        """
+        HTTP 429 is always retryable (even for POST/PATCH), otherwise fall back
+        to the configuration.
+        """
+        if status_code == HTTP_TOO_MANY_REQUESTS:
+            return True
+        return super().is_retry(method, status_code, has_retry_after=has_retry_after)
+
+    def get_backoff_time(self):
+        """
+        When we're retrying HTTP error responses, ensure we don't execute the
+        first retry immediately.
+        Also overrides the default 2**n algorithm with one based on the Fibonacci sequence.
+        On ``urllib3<2``, this also backports ``backoff_jitter`` and ``backoff_max``.
+        """
+        # We want to consider only the last consecutive errors sequence (Ignore redirects).
+        consecutive_errors = list(
+            takewhile(lambda x: x.redirect_location is None, reversed(self.history))
+        )
+        consecutive_errors_len = len(consecutive_errors)
+        if consecutive_errors_len and consecutive_errors[0].status is not None:
+            # Ensure we only immediately retry for local (connection/read) errors,
+            # not when we got an HTTP response.
+            consecutive_errors_len += 1
+        if consecutive_errors_len <= 1:
+            return 0
+        # Approximate the nth Fibonacci number.
+        # We want to begin with the 4th one (2).
+        backoff_value = round(
+            self.backoff_factor
+            * round(self.PHI ** (consecutive_errors_len + 1) / self.SQRT5),
+            1,
+        )
+        if self.backoff_jitter != 0.0:
+            backoff_value += random.random() * self.backoff_jitter
+        return float(max(0, min(self.backoff_max, backoff_value)))
+
+    def get_retry_after(self, response):
+        """
+        The default implementation sleeps for as long as requested
+        by the ``Retry-After`` header. We want to limit that somewhat
+        to avoid sleeping until the end of the universe.
+        """
+        retry_after = response.headers.get("Retry-After")
+
+        if retry_after is None:
+            return None
+
+        res = self.parse_retry_after(retry_after)
+        if self.retry_after_max is None:
+            return res
+        return min(res, self.retry_after_max)
+
+    def new(self, **kw):
+        """
+        Since we backport some params and introduce a new one,
+        ensure all requests use the defined parameters, not the default ones.
+        """
+        ret = super().new(**kw)
+        if URLLIB3V1:
+            ret.backoff_jitter = self.backoff_jitter
+            ret.backoff_max = self.backoff_max
+        ret.retry_after_max = self.retry_after_max
+        return ret
 
 
 class VaultClient:
@@ -1678,27 +1899,73 @@ class VaultClient:
     Base class for authenticated client.
     """
 
-    def __init__(self, url, namespace=None, verify=None, session=None):
+    def __init__(
+        self,
+        url,
+        namespace=None,
+        verify=None,
+        session=None,
+        connect_timeout=DEFAULT_CONNECT_TIMEOUT,
+        read_timeout=DEFAULT_READ_TIMEOUT,
+        max_retries=DEFAULT_MAX_RETRIES,
+        backoff_factor=DEFAULT_BACKOFF_FACTOR,
+        backoff_max=DEFAULT_BACKOFF_MAX,
+        backoff_jitter=DEFAULT_BACKOFF_JITTER,
+        retry_post=DEFAULT_RETRY_POST,
+        respect_retry_after=DEFAULT_RESPECT_RETRY_AFTER,
+        retry_status=DEFAULT_RETRY_STATUS,
+        retry_after_max=DEFAULT_RETRY_AFTER_MAX,
+    ):
         self.url = url
         self.namespace = namespace
         self.verify = verify
 
-        ca_cert = None
-        try:
-            if verify.startswith("-----BEGIN CERTIFICATE"):
-                ca_cert = verify
-                verify = None
-        except AttributeError:
-            pass
+        self.connect_timeout = connect_timeout
+        self.read_timeout = read_timeout
 
-        # Keep the actual requests parameter separate from the client config
-        # to reduce complexity in config validation.
-        self._requests_verify = verify
+        # Cap the retry-backoff values somewhat
+        self.max_retries = max(0, min(max_retries, MAX_MAX_RETRIES))
+        self.backoff_factor = max(0, min(backoff_factor, MAX_BACKOFF_FACTOR))
+        self.backoff_max = max(0, min(backoff_max, MAX_BACKOFF_MAX))
+        self.backoff_jitter = max(0, min(backoff_jitter, MAX_BACKOFF_JITTER))
+        self.retry_post = bool(retry_post)
+        self.respect_retry_after = bool(respect_retry_after)
+        self.retry_after_max = (
+            max(0, retry_after_max) if retry_after_max is not None else None
+        )
+        self.retry_status = tuple(retry_status) if retry_status is not None else None
+
+        retry = VaultRetry(
+            total=self.max_retries,
+            backoff_factor=self.backoff_factor,
+            backoff_max=self.backoff_max,
+            backoff_jitter=self.backoff_jitter,
+            respect_retry_after_header=self.respect_retry_after,
+            retry_after_max=self.retry_after_max,
+            allowed_methods=None if retry_post else Retry.DEFAULT_ALLOWED_METHODS,
+            raise_on_status=False,
+            status_forcelist=self.retry_status,
+        )
+
         if session is None:
             session = requests.Session()
-            if ca_cert:
-                adapter = CACertHTTPSAdapter(ca_cert)
-                session.mount(url, adapter)
+            adapter = VaultAPIAdapter(
+                max_retries=retry,
+                verify=verify,
+                connect_timeout=self.connect_timeout,
+                read_timeout=self.read_timeout,
+            )
+            session.mount(url, adapter)
+        else:
+            # Sessions should only be inherited from other instances
+            # of this class. A changed ``verify`` setting causes a fresh
+            # client to be instantiated.
+            # We want to keep the TCP connection alive, so we'll modify
+            # the adapter in place.
+            adapter = session.get_adapter(url)
+            adapter.max_retries = retry
+            adapter.connect_timeout = self.connect_timeout
+            adapter.read_timeout = self.read_timeout
         self.session = session
 
     def delete(self, endpoint, wrap=False, raise_error=True, add_headers=None):
@@ -1814,7 +2081,6 @@ class VaultClient:
             url,
             headers=headers,
             json=payload,
-            verify=self._requests_verify,
             **kwargs,
         )
         return res
@@ -1948,6 +2214,8 @@ class VaultClient:
             raise VaultUnsupportedOperationError(errors)
         if res.status_code == 412:
             raise VaultPreconditionFailedError(errors)
+        if res.status_code == HTTP_TOO_MANY_REQUESTS:
+            raise VaultRateLimitExceededError(errors)
         if res.status_code in (500, 502):
             raise VaultServerError(errors)
         if res.status_code == 503:

@@ -91,7 +91,11 @@ def auth_info():
     info["token"] = client.get("auth/token/lookup-self")["data"]
     if _config("auth:method") == "approle":
         try:
-            info["secret_id"] = _get_approle_api().read_secret_id(_config("auth:approle_name"), mount=_config("auth:approle_mount"), secret_id=str(client.auth.approle.secret_id))
+            info["secret_id"] = _get_approle_api().read_secret_id(
+                _config("auth:approle_name"),
+                mount=_config("auth:approle_mount"),
+                secret_id=str(client.auth.approle.secret_id),
+            )
         except vault.VaultPermissionDeniedError:
             info["secret_id"] = (
                 "Permission denied, allow API `create`, `update` access to "
@@ -323,6 +327,7 @@ def get_config(
                 "token_lifecycle": _config("auth:token_lifecycle"),
             },
             "cache": _config("cache"),
+            "client": _config("client"),
             "server": _config("server"),
             "wrap_info_nested": [],
         }
