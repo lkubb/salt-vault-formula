@@ -8,10 +8,11 @@ include:
   - {{ sls_service_running }}
 
 {%- for plugin in vault.plugins %}
+{%-   set cmd_name = plugin.get("bin_name", "{name}_{version}").format(name=plugin.name, version=plugin.get("version") or "") %}
 
 Vault plugin {{ plugin.name }} is present:
   file.managed:
-    - name: {{ vault.config.plugin_directory | path_join(plugin.name) }}
+    - name: {{ vault.config.plugin_directory | path_join(cmd_name) }}
     - source: {{ plugin.source | json }}
     - source_hash: {{ plugin.hash }}
 {%- for param in ["source_hash_sig", "signature", "signed_by_any", "signed_by_all", "keyring", "gnupghome"] %}
@@ -35,6 +36,7 @@ Vault plugin {{ plugin.name }} is registered:
     - args: {{ plugin.get("args", "null") }}
     - env: {{ plugin.get("env", "null") }}
     - version: {{ plugin.get("version", "null") }}
+    - command: {{ cmd_name }}
     - require:
       - Vault plugin {{ plugin.name }} is present
 {%- endfor %}

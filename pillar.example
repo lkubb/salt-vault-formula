@@ -114,6 +114,7 @@ vault:
   # --------
   #   args:
   #     - argument
+  #   cmd_name: {name}_{version}
   #   env:
   #     - envvar=envval
   #   version: 0.0.2
