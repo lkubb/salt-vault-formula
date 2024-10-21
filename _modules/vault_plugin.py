@@ -9,8 +9,7 @@ import logging
 
 import salt.utils.versions
 import vaultutil as vault
-from salt.exceptions import (CommandExecutionError, SaltException,
-                             SaltInvocationError)
+from salt.exceptions import CommandExecutionError, SaltException, SaltInvocationError
 
 log = logging.getLogger(__name__)
 __func_alias__ = {"list_": "list"}
@@ -117,10 +116,13 @@ def show(plugin_type, plugin_name, filter_sha=None, filter_version=None):
     _check_type(plugin_type)
     if filter_version:
         filter_version = filter_version.lstrip("v")
+    endpoint = f"sys/plugins/catalog/{plugin_type}/{plugin_name}"
+    if filter_version:
+        endpoint += f"?version={filter_version}"
     try:
         plugin = vault.query(
             "GET",
-            f"sys/plugins/catalog/{plugin_type}/{plugin_name}",
+            endpoint,
             __opts__,
             __context__,
         )["data"]
